@@ -1,8 +1,9 @@
 import { useMutation, useQuery } from 'convex/react'
-import { ChevronRight, Clock, Copy, FileText, Folder, FolderInput, FolderPlus, LayoutGrid, Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { ChevronRight, Clock, Copy, FileText, Folder, FolderInput, FolderPlus, LayoutGrid, Pencil, Plus, Search, Trash2, Users } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
+import { AccountBlock } from './Account'
 import { Logo } from './editor/Editor'
 
 function ago(t: number): string {
@@ -13,13 +14,14 @@ function ago(t: number): string {
   return `${Math.round(s / 86400)} days ago`
 }
 
-type View = { kind: 'recents' } | { kind: 'drafts' } | { kind: 'projects' } | { kind: 'project'; id: Id<'projects'> }
+type View = { kind: 'recents' } | { kind: 'drafts' } | { kind: 'shared' } | { kind: 'projects' } | { kind: 'project'; id: Id<'projects'> }
 
 /** The view lives in the URL (#/, #/drafts, #/projects, #/project/<id>) so Back works and links can be shared. */
 function viewFromHash(hash: string): View {
   const m = hash.match(/^#\/project\/([\w-]+)/)
   if (m) return { kind: 'project', id: m[1] as Id<'projects'> }
   if (hash.startsWith('#/drafts')) return { kind: 'drafts' }
+  if (hash.startsWith('#/shared')) return { kind: 'shared' }
   if (hash.startsWith('#/projects')) return { kind: 'projects' }
   return { kind: 'recents' }
 }
@@ -27,8 +29,8 @@ function viewFromHash(hash: string): View {
 type Menu = { x: number; y: number } & ({ file: Id<'files'>; moving?: boolean } | { project: Id<'projects'> })
 
 export function Home() {
-  const files = useQuery(api.files.list)
-  const projects = useQuery(api.projects.list)
+  const files = useQuery(api.files.list, {})
+  const projects = useQuery(api.projects.list, {})
   const create = useMutation(api.files.create)
   const rename = useMutation(api.files.rename)
   const remove = useMutation(api.files.remove)
@@ -43,7 +45,7 @@ export function Home() {
   const view = viewFromHash(location.hash)
 
   const project = view.kind === 'project' ? projects?.find((p) => p._id === view.id) : undefined
-  const title = view.kind === 'recents' ? 'Recents' : view.kind === 'drafts' ? 'Drafts' : view.kind === 'projects' ? 'All projects' : (project?.name ?? 'Project')
+  const title = view.kind === 'recents' ? 'Recents' : view.kind === 'drafts' ? 'Drafts' : view.kind === 'shared' ? 'Shared with me' : view.kind === 'projects' ? 'All projects' : (project?.name ?? 'Project')
   useEffect(() => {
     document.title = `${title} – Figma Clone`
   }, [title])
@@ -61,7 +63,8 @@ export function Home() {
   const q = query.trim().toLowerCase()
   const shown = (files ?? []).filter((f) => {
     if (q && !f.name.toLowerCase().includes(q)) return false
-    if (view.kind === 'drafts') return !f.projectId
+    if (view.kind === 'drafts') return !f.projectId && f.role === 'owner'
+    if (view.kind === 'shared') return f.role !== 'owner'
     if (view.kind === 'project') return f.projectId === view.id
     return true
   })
@@ -104,7 +107,11 @@ export function Home() {
           </a>
           <a href="#/drafts" className={view.kind === 'drafts' ? 'active' : ''}>
             <FileText size={15} /> <span className="grow">Drafts</span>
-            <span className="count">{files?.filter((f) => !f.projectId).length ?? ''}</span>
+            <span className="count">{files?.filter((f) => !f.projectId && f.role === 'owner').length ?? ''}</span>
+          </a>
+          <a href="#/shared" className={view.kind === 'shared' ? 'active' : ''}>
+            <Users size={15} /> <span className="grow">Shared with me</span>
+            <span className="count">{files?.filter((f) => f.role !== 'owner').length ?? ''}</span>
           </a>
           <a href="#/projects" className={view.kind === 'projects' ? 'active' : ''}>
             <LayoutGrid size={15} /> <span className="grow">All projects</span>
@@ -137,8 +144,9 @@ export function Home() {
           </nav>
         </div>
         <div className="home-note">
-          Agents can drive this workspace through the <code>figma-clone</code> MCP server — see README.
+          Agents can work in your files through the <code>figma-clone</code> MCP server. Create an API token under your account below, or let the agent sign in through the browser.
         </div>
+        <AccountBlock />
       </aside>
       <main className="home-main">
         <header>
@@ -207,7 +215,7 @@ export function Home() {
                 </div>
                 <div className="meta">
                   <b>Drafts</b>
-                  <span>{files?.filter((f) => !f.projectId).length ?? 0} files not in a project</span>
+                  <span>{files?.filter((f) => !f.projectId && f.role === 'owner').length ?? 0} files not in a project</span>
                 </div>
               </a>
               {shownProjects.map((p) => (
@@ -263,7 +271,7 @@ export function Home() {
                   <div className="meta">
                     {renaming === f._id ? nameInput(f._id, f.name, (name) => void rename({ fileId: f._id, name })) : <b>{f.name}</b>}
                     <span>
-                      {view.kind === 'recents' ? `${projectName(f.projectId)} · ` : ''}Edited {ago(f.updatedAt)}
+                      {f.role !== 'owner' ? `Shared by ${f.ownerName ?? 'someone'} · ${f.role === 'editor' ? 'can edit' : 'view only'} · ` : view.kind === 'recents' ? `${projectName(f.projectId)} · ` : ''}Edited {ago(f.updatedAt)}
                     </span>
                   </div>
                 </a>
@@ -273,8 +281,10 @@ export function Home() {
               <p className="home-empty">
                 {q
                   ? 'No files match your search.'
-                  : view.kind === 'drafts'
-                    ? 'No drafts — every file is in a project.'
+                  : view.kind === 'shared'
+                    ? 'Nothing has been shared with you yet. Files other people invite you to appear here.'
+                    : view.kind === 'drafts'
+                      ? 'No drafts — every file is in a project.'
                     : view.kind === 'project'
                       ? 'This project is empty. Create a file here, or right-click a file elsewhere and choose "Move to project".'
                       : 'No files yet — create your first design file.'}
@@ -351,6 +361,7 @@ export function Home() {
                 </button>
                 <button
                   className="menu-item"
+                  disabled={menuFile?.role === 'viewer'}
                   onClick={() => {
                     setMenu(null)
                     setRenaming(menu.file)
@@ -367,13 +378,14 @@ export function Home() {
                 >
                   <Copy size={14} /> <span className="grow">Duplicate</span>
                 </button>
-                <button className="menu-item" onClick={() => setMenu({ ...menu, moving: true })}>
+                <button className="menu-item" disabled={menuFile?.role !== 'owner'} onClick={() => setMenu({ ...menu, moving: true })}>
                   <FolderInput size={14} /> <span className="grow">Move to project</span>
                   <ChevronRight size={12} />
                 </button>
                 <hr />
                 <button
                   className="menu-item danger"
+                  disabled={menuFile?.role !== 'owner'}
                   onClick={() => {
                     setMenu(null)
                     if (confirm(`Delete "${menuFile?.name}"? This cannot be undone.`)) void remove({ fileId: menu.file })

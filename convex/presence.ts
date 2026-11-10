@@ -1,13 +1,16 @@
 import { mutation, query } from './_generated/server'
 import { v } from 'convex/values'
+import { fileAccess, tokenArg, tryAccess } from './access'
 
 export const list = query({
-  args: { fileId: v.id('files') },
-  handler: async (ctx, { fileId }) =>
-    ctx.db
+  args: { fileId: v.id('files'), ...tokenArg },
+  handler: async (ctx, { fileId, token }) => {
+    await fileAccess(ctx, fileId, token, 'view')
+    return ctx.db
       .query('presence')
       .withIndex('by_file', (q) => q.eq('fileId', fileId))
-      .collect(),
+      .collect()
+  },
 })
 
 export const update = mutation({
@@ -21,15 +24,19 @@ export const update = mutation({
     y: v.number(),
     selection: v.array(v.string()),
     isAgent: v.optional(v.boolean()),
+    ...tokenArg,
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx, { token, ...args }) => {
+    // Anyone who can see the file shows up in it; silently ignore everybody else.
+    if (!(await tryAccess(ctx, args.fileId, token))) return
     const now = Date.now()
     const existing = await ctx.db
       .query('presence')
       .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
       .unique()
-    if (existing) await ctx.db.patch(existing._id, { ...args, updatedAt: now })
-    else {
+    if (existing) {
+      if (existing.fileId === args.fileId) await ctx.db.patch(existing._id, { ...args, updatedAt: now })
+    } else {
       await ctx.db.insert('presence', { ...args, updatedAt: now })
       // Sweep stale rows whenever somebody joins.
       const rows = await ctx.db
@@ -41,8 +48,9 @@ export const update = mutation({
   },
 })
 
+/** Session ids are unguessable random strings known only to their own client. */
 export const leave = mutation({
-  args: { sessionId: v.string() },
+  args: { sessionId: v.string(), ...tokenArg },
   handler: async (ctx, { sessionId }) => {
     const existing = await ctx.db
       .query('presence')

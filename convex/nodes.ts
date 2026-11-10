@@ -1,9 +1,11 @@
 import { mutation, query } from './_generated/server'
-import { v } from 'convex/values'
+import { ConvexError, v } from 'convex/values'
+import { fileAccess, pageAccess, tokenArg } from './access'
 
 export const list = query({
-  args: { pageId: v.id('pages') },
-  handler: async (ctx, { pageId }) => {
+  args: { pageId: v.id('pages'), ...tokenArg },
+  handler: async (ctx, { pageId, token }) => {
+    await pageAccess(ctx, pageId, token, 'view')
     const rows = await ctx.db
       .query('nodes')
       .withIndex('by_page', (q) => q.eq('pageId', pageId))
@@ -13,8 +15,9 @@ export const list = query({
 })
 
 export const get = query({
-  args: { fileId: v.id('files'), ids: v.array(v.string()) },
-  handler: async (ctx, { fileId, ids }) => {
+  args: { fileId: v.id('files'), ids: v.array(v.string()), ...tokenArg },
+  handler: async (ctx, { fileId, ids, token }) => {
+    await fileAccess(ctx, fileId, token, 'view')
     const out = []
     for (const nid of ids) {
       const row = await ctx.db
@@ -34,8 +37,10 @@ export const get = query({
  *   { op: 'delete', id }
  */
 export const applyOps = mutation({
-  args: { fileId: v.id('files'), pageId: v.id('pages'), ops: v.array(v.any()) },
-  handler: async (ctx, { fileId, pageId, ops }) => {
+  args: { fileId: v.id('files'), pageId: v.id('pages'), ops: v.array(v.any()), ...tokenArg },
+  handler: async (ctx, { fileId, pageId, ops, token }) => {
+    const { page } = await pageAccess(ctx, pageId, token, 'edit')
+    if (page.fileId !== fileId) throw new ConvexError('That page belongs to a different file')
     const find = (nid: string) =>
       ctx.db
         .query('nodes')
@@ -44,7 +49,7 @@ export const applyOps = mutation({
     for (const op of ops) {
       if (op.op === 'create') {
         const node = op.node
-        if (!node || typeof node.id !== 'string') throw new Error('create op needs node.id')
+        if (!node || typeof node.id !== 'string') throw new ConvexError('create op needs node.id')
         const existing = await find(node.id)
         if (existing) await ctx.db.patch(existing._id, { data: node, pageId })
         else await ctx.db.insert('nodes', { fileId, pageId, nid: node.id, data: node })

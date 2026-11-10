@@ -1,14 +1,25 @@
 // Design-system lookups across files ("libraries") and Code Connect mappings.
 import { mutation, query } from './_generated/server'
 import { v } from 'convex/values'
+import { accessibleFiles, fileAccess, tokenArg, viewerId } from './access'
 
 /** Every main component and shared style in the workspace, with the file it lives in. */
 export const assets = query({
-  args: {},
-  handler: async (ctx) => {
-    const files = await ctx.db.query('files').collect()
+  args: { ...tokenArg },
+  handler: async (ctx, { token }) => {
+    const userId = await viewerId(ctx, token)
+    if (!userId) return { components: [], styles: [], files: [] }
+    // Only files the caller owns or was invited to act as libraries.
+    const files = (await accessibleFiles(ctx, userId)).map((a) => a.file)
     const fileName = new Map(files.map((f) => [f._id as string, f.name]))
-    const nodes = await ctx.db.query('nodes').collect()
+    const nodes = []
+    for (const f of files)
+      nodes.push(
+        ...(await ctx.db
+          .query('nodes')
+          .withIndex('by_file_nid', (q) => q.eq('fileId', f._id))
+          .collect()),
+      )
     const byKey = new Map(nodes.map((n) => [n.fileId + ':' + n.nid, n.data]))
     const components = []
     for (const n of nodes) {
@@ -27,7 +38,15 @@ export const assets = query({
         componentSet: set?.isComponentSet ? { nodeId: d.parentId as string, name: set.name as string } : null,
       })
     }
-    const styles = (await ctx.db.query('styles').collect()).map((s) => ({
+    const styleRows = []
+    for (const f of files)
+      styleRows.push(
+        ...(await ctx.db
+          .query('styles')
+          .withIndex('by_file', (q) => q.eq('fileId', f._id))
+          .collect()),
+      )
+    const styles = styleRows.map((s) => ({
       fileId: s.fileId,
       fileName: fileName.get(s.fileId) ?? '',
       styleId: s._id,
@@ -41,8 +60,9 @@ export const assets = query({
 
 /** A node with its whole subtree (used to copy a component into another file). */
 export const subtree = query({
-  args: { fileId: v.id('files'), nodeId: v.string() },
-  handler: async (ctx, { fileId, nodeId }) => {
+  args: { fileId: v.id('files'), nodeId: v.string(), ...tokenArg },
+  handler: async (ctx, { fileId, nodeId, token }) => {
+    await fileAccess(ctx, fileId, token, 'view')
     const root = await ctx.db
       .query('nodes')
       .withIndex('by_file_nid', (q) => q.eq('fileId', fileId).eq('nid', nodeId))
@@ -66,12 +86,14 @@ export const subtree = query({
 })
 
 export const codeConnectList = query({
-  args: { fileId: v.id('files') },
-  handler: async (ctx, { fileId }) =>
-    ctx.db
+  args: { fileId: v.id('files'), ...tokenArg },
+  handler: async (ctx, { fileId, token }) => {
+    await fileAccess(ctx, fileId, token, 'view')
+    return ctx.db
       .query('codeConnect')
       .withIndex('by_file', (q) => q.eq('fileId', fileId))
-      .collect(),
+      .collect()
+  },
 })
 
 /** Add or replace the mapping of a node for one framework label. */
@@ -88,8 +110,10 @@ export const codeConnectSet = mutation({
         templateDataJson: v.optional(v.string()),
       }),
     ),
+    ...tokenArg,
   },
-  handler: async (ctx, { fileId, mappings }) => {
+  handler: async (ctx, { fileId, mappings, token }) => {
+    await fileAccess(ctx, fileId, token, 'edit')
     const existing = await ctx.db
       .query('codeConnect')
       .withIndex('by_file', (q) => q.eq('fileId', fileId))
@@ -104,8 +128,9 @@ export const codeConnectSet = mutation({
 })
 
 export const codeConnectRemove = mutation({
-  args: { fileId: v.id('files'), nodeId: v.string(), label: v.optional(v.string()) },
-  handler: async (ctx, { fileId, nodeId, label }) => {
+  args: { fileId: v.id('files'), nodeId: v.string(), label: v.optional(v.string()), ...tokenArg },
+  handler: async (ctx, { fileId, nodeId, label, token }) => {
+    await fileAccess(ctx, fileId, token, 'edit')
     const rows = await ctx.db
       .query('codeConnect')
       .withIndex('by_file', (q) => q.eq('fileId', fileId))

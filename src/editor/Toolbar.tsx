@@ -74,12 +74,21 @@ export function Toolbar() {
   const tool = useEditor((s) => s.tool)
   const canUndo = useEditor((s) => s.canUndo)
   const canRedo = useEditor((s) => s.canRedo)
+  const readOnly = useEditor((s) => s.readOnly)
   const file = useRef<HTMLInputElement>(null)
   const single = (t: Tool, label: string, key: string, icon: ReactNode) => (
     <button className={'tool' + (tool === t ? ' active' : '')} title={`${label} (${key})`} onClick={() => setTool(t)}>
       {icon}
     </button>
   )
+  if (readOnly)
+    return (
+      <div className="toolbar">
+        <Group items={MOVE} />
+        {single('comment', 'Comment', 'C', <MessageCircle {...I} />)}
+        <span className="toolbar-note">View only</span>
+      </div>
+    )
   return (
     <div className="toolbar">
       <Group items={MOVE} />

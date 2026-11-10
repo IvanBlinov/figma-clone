@@ -1,19 +1,23 @@
 import { mutation, query } from './_generated/server'
 import { v } from 'convex/values'
+import { fileAccess, tokenArg } from './access'
 
 export const latest = query({
-  args: { fileId: v.id('files') },
-  handler: async (ctx, { fileId }) =>
-    ctx.db
+  args: { fileId: v.id('files'), ...tokenArg },
+  handler: async (ctx, { fileId, token }) => {
+    await fileAccess(ctx, fileId, token, 'view')
+    return ctx.db
       .query('commands')
       .withIndex('by_file', (q) => q.eq('fileId', fileId))
       .order('desc')
-      .first(),
+      .first()
+  },
 })
 
 export const send = mutation({
-  args: { fileId: v.id('files'), type: v.string(), payload: v.any() },
-  handler: async (ctx, { fileId, type, payload }) => {
+  args: { fileId: v.id('files'), type: v.string(), payload: v.any(), ...tokenArg },
+  handler: async (ctx, { fileId, type, payload, token }) => {
+    await fileAccess(ctx, fileId, token, 'edit')
     const old = await ctx.db
       .query('commands')
       .withIndex('by_file', (q) => q.eq('fileId', fileId))

@@ -5,13 +5,16 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { Resvg } from '@resvg/resvg-js'
 import { ConvexHttpClient } from 'convex/browser'
 import { anyApi } from 'convex/server'
 import { existsSync, readFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
+import { currentToken, forgetToken, requestToken, startLogin } from './auth'
 import { registerParity } from './parity'
 import {
   ancestors,
@@ -55,7 +58,23 @@ const APP_URL = (process.env.FIGMA_CLONE_APP_URL || 'http://localhost:5173').rep
 const AGENT_NAME = process.env.FIGMA_CLONE_AGENT_NAME || 'Claude'
 const SESSION = 'agent-' + newId()
 
-const convex = new ConvexHttpClient(CONVEX_URL)
+// HTTP endpoints of the deployment (OAuth). Convex cloud serves them on *.convex.site; a local backend on the next port.
+const SITE_URL = (
+  process.env.FIGMA_CLONE_SITE_URL ||
+  (process.env.FIGMA_CLONE_CONVEX_URL ? '' : env.VITE_CONVEX_SITE_URL) ||
+  (CONVEX_URL.includes('.convex.cloud') ? CONVEX_URL.replace('.convex.cloud', '.convex.site') : CONVEX_URL.replace(/:(\d+)$/, (_m, p) => ':' + (+p + 1)))
+).replace(/\/$/, '')
+
+const client = new ConvexHttpClient(CONVEX_URL)
+/** Every call carries the caller's access token (see auth.ts), which the backend maps to a user. */
+const withToken = (args: Record<string, unknown>) => {
+  const t = currentToken(CONVEX_URL)
+  return t ? { ...args, token: t.token } : args
+}
+const convex = {
+  query: (fn: unknown, args: Record<string, unknown>) => client.query(fn as never, withToken(args) as never) as Promise<any>, // eslint-disable-line @typescript-eslint/no-explicit-any
+  mutation: (fn: unknown, args: Record<string, unknown>) => client.mutation(fn as never, withToken(args) as never) as Promise<any>, // eslint-disable-line @typescript-eslint/no-explicit-any
+}
 const api = anyApi
 const fileUrl = (fileId: string) => `${APP_URL}/#/file/${fileId}`
 
@@ -263,16 +282,30 @@ function full(ix: DocIndex, id: string): Record<string, unknown> {
 
 const ok = (data: unknown) => ({ content: [{ type: 'text' as const, text: typeof data === 'string' ? data : JSON.stringify(data, null, 1) }] })
 
+const registrations: { name: string; description: string; shape: z.ZodRawShape; run: (args: never) => Promise<unknown> }[] = []
+
+/** Declare a tool. Tools are registered on every server instance (one for stdio, one per request over HTTP). */
 function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, handler: (args: z.infer<z.ZodObject<S>>) => Promise<{ content: unknown[] }>) {
-  server.registerTool(name, { description, inputSchema: shape }, (async (args: z.infer<z.ZodObject<S>>) => {
-    try {
-      return await handler(args)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      const hint = /fetch failed|ECONNREFUSED/i.test(msg) ? ` — is the Convex backend running at ${CONVEX_URL}? Start it with "npm run dev:backend".` : ''
-      return { content: [{ type: 'text' as const, text: `Error: ${msg}${hint}` }], isError: true }
-    }
-  }) as never)
+  registrations.push({
+    name,
+    description,
+    shape,
+    run: async (args: z.infer<z.ZodObject<S>>) => {
+      try {
+        return await handler(args)
+      } catch (e) {
+        const data = (e as { data?: unknown }).data
+        const msg = typeof data === 'string' ? data : e instanceof Error ? e.message : String(e)
+        let hint = ''
+        if (/fetch failed|ECONNREFUSED/i.test(msg)) hint = ` — is the Convex backend reachable at ${CONVEX_URL}?`
+        else if (/Not signed in|Invalid, expired or revoked/i.test(msg))
+          hint = currentToken(CONVEX_URL)
+            ? ' — the saved access token is no longer valid. Call the login tool to sign in again, or set FIGMA_CLONE_TOKEN to a new API token.'
+            : ' — call the login tool to sign in through the browser, or set FIGMA_CLONE_TOKEN to an API token created in the app (Account → API tokens).'
+        return { content: [{ type: 'text' as const, text: `Error: ${msg}${hint}` }], isError: true }
+      }
+    },
+  })
 }
 
 // ---------- server ----------
@@ -306,10 +339,13 @@ const NODE_GUIDE = `Node model (all coordinates are px, relative to the parent's
 - Prototype: reactions:[{trigger:"ON_CLICK"|"ON_HOVER"|"ON_PRESS"|"AFTER_TIMEOUT", action:"NAVIGATE"|"OVERLAY"|"CLOSE_OVERLAY"|"BACK"|"URL", destinationId? (a top-level FRAME), url?, transition?:"INSTANT"|"DISSOLVE"|"SMART_ANIMATE"|"MOVE_IN"|"PUSH"|"SLIDE_IN", direction?, duration? (ms), easing?, timeout? (ms)}] on any node; flowStart:"Flow 1" on a top-level frame marks a starting point. See add_interaction / get_prototype_url.
 - Shared styles: fillStyleId / strokeStyleId / textStyleId link a node to a style from list_styles (use apply_style); editing the style updates every linked node.`
 
-const server = new McpServer(
-  { name: 'figma-clone', version: '0.3.0' },
-  {
-    instructions: `Design tool (Figma clone) backed by Convex. Projects group files (a file without a project is a draft). Files contain pages; pages contain a tree of nodes. Edits appear live in the browser editor at ${APP_URL}.
+const makeServer = () => {
+  const server = new McpServer({ name: 'figma-clone', version: '0.4.0' }, { instructions: INSTRUCTIONS })
+  for (const r of registrations) server.registerTool(r.name, { description: r.description, inputSchema: r.shape }, r.run as never)
+  return server
+}
+
+const INSTRUCTIONS = `Design tool (Figma clone) backed by Convex. Projects group files (a file without a project is a draft). Files contain pages; pages contain a tree of nodes. Edits appear live in the browser editor at ${APP_URL}.
 Typical flow: list_files / create_file → get_tree to inspect → create_nodes / update_nodes to design → export_image to look at the result and iterate.
 Reusable UI: build a FRAME, turn it into a component (create_component), then place copies with create_instance and override text/fills per instance.
 Clickable prototypes: connect layers to frames with add_interaction and hand the user get_prototype_url.
@@ -317,20 +353,46 @@ Figma-compatible tools are also available under the names of the official Figma 
 get_variable_defs, search_design_system, get_libraries, Code Connect (add_code_connect_map, get_code_connect_map, …), upload_assets, download_assets,
 generate_diagram (Mermaid), create_new_file, whoami, and use_figma, which runs Figma Plugin API JavaScript — read get_figma_skill skill://figma/figma-use/SKILL.md first.
 Never guess ids: take them from list_files, list_pages, get_tree, find_nodes or the results of create_nodes.
+Access: you act as one user and see only the files they own or were invited to. If a tool reports "Not signed in", call login (opens a browser sign-in for the user) and retry.
 
-${NODE_GUIDE}`,
+${NODE_GUIDE}`
+
+tool(
+  'login',
+  'Sign in through the browser so this server can act as the user (OAuth). Opens the sign-in page on the user\'s machine and waits for them to approve. Not needed when FIGMA_CLONE_TOKEN is set or a previous login is still valid — check with whoami first.',
+  { wait: z.boolean().optional().describe('Wait up to two minutes for the user to finish (default true)') },
+  async ({ wait }) => {
+    const existing = currentToken(CONVEX_URL)
+    if (existing) {
+      try {
+        const me = await convex.query(api.users.me as never, {})
+        if (me) return ok({ signedIn: true, user: me, via: existing.source })
+      } catch {
+        if (existing.source === 'login') forgetToken(CONVEX_URL)
+        else throw new Error('The access token in FIGMA_CLONE_TOKEN is invalid or revoked. Replace it with a new one from Account → API tokens.')
+      }
+    }
+    const flow = await startLogin(CONVEX_URL, SITE_URL)
+    const outcome = wait === false ? 'pending' : await Promise.race([flow.done.then(() => 'done' as const), new Promise<'pending'>((r) => setTimeout(() => r('pending'), 120_000))])
+    if (outcome === 'done') return ok({ signedIn: true, user: await convex.query(api.users.me as never, {}), via: 'login' })
+    return ok({ signedIn: false, message: 'Waiting for the user to approve in their browser. Ask them to open this URL, sign in and click Allow, then call whoami (the link is valid for five minutes).', url: flow.url })
   },
 )
+
+tool('logout', 'Forget the access token saved by login on this machine. (Revoke it for good in the app under Account → API tokens.)', {}, async () => {
+  const removed = forgetToken(CONVEX_URL)
+  return ok({ loggedOut: removed, note: process.env.FIGMA_CLONE_TOKEN ? 'FIGMA_CLONE_TOKEN is still set in the environment and will keep being used.' : undefined })
+})
 
 const fileId = z.string().describe('File id (from list_files or create_file)')
 const pageIdOpt = z.string().optional().describe('Page id; defaults to the first page of the file')
 
 tool(
   'list_files',
-  'List design files with their ids, names, project and editor URLs. Files without a project are drafts.',
+  'List the design files you own or that were shared with you, with ids, names, your role (owner / editor / viewer), project and editor URLs. Files without a project are drafts.',
   { projectId: z.string().optional().describe('Only files in this project'), draftsOnly: z.boolean().optional().describe('Only files that are not in any project') },
   async ({ projectId, draftsOnly }) => {
-    const files = (await convex.query(api.files.list, {})) as { _id: string; name: string; updatedAt: number; projectId?: string }[]
+    const files = (await convex.query(api.files.list, {})) as { _id: string; name: string; updatedAt: number; projectId?: string; role: string; ownerName: string | null }[]
     const projects = (await convex.query(api.projects.list, {})) as { _id: string; name: string }[]
     return ok(
       files
@@ -338,6 +400,8 @@ tool(
         .map((f) => ({
           fileId: f._id,
           name: f.name,
+          role: f.role,
+          ...(f.ownerName ? { sharedBy: f.ownerName } : {}),
           project: f.projectId ? { projectId: f.projectId, name: projects.find((p) => p._id === f.projectId)?.name } : null,
           updatedAt: new Date(f.updatedAt).toISOString(),
           url: fileUrl(f._id),
@@ -387,6 +451,40 @@ tool('rename_file', 'Rename a design file.', { fileId, name: z.string() }, async
   await convex.mutation(api.files.rename, a)
   return ok({ renamed: true })
 })
+
+tool('get_sharing', 'Who has access to a file: its owner, the people it is shared with (and their role), whether anyone with the link can view it, and your own role.', { fileId }, async ({ fileId }) => {
+  const info = await convex.query(api.sharing.get, { fileId })
+  if (!info) throw new Error('File not found, or you do not have access to it')
+  return ok({ yourRole: info.role, owner: info.owner, people: info.people.map((p: { _id: string; email: string; role: string; joined: boolean }) => ({ shareId: p._id, email: p.email, role: p.role, hasAccount: p.joined })), linkAccess: info.linkAccess, url: fileUrl(fileId) })
+})
+
+tool(
+  'share_file',
+  'Share a file you own with someone by email as "editor" or "viewer" (also changes the role of someone already invited). They see it under "Shared with me" once they sign in with that email. Only do this when the user asked for it.',
+  { fileId, email: z.string(), role: z.enum(['editor', 'viewer']) },
+  async ({ fileId, email, role }) => {
+    await convex.mutation(api.sharing.invite, { fileId, email, role })
+    return ok({ shared: true, email: email.trim().toLowerCase(), role, url: fileUrl(fileId) })
+  },
+)
+
+tool('unshare_file', 'Remove someone\'s access to a file you own.', { fileId, email: z.string() }, async ({ fileId, email }) => {
+  const info = await convex.query(api.sharing.get, { fileId })
+  const hit = info?.people.find((p: { email: string }) => p.email === email.trim().toLowerCase())
+  if (!hit) throw new Error(`${email} does not have access to this file`)
+  await convex.mutation(api.sharing.remove, { shareId: hit._id })
+  return ok({ removed: true })
+})
+
+tool(
+  'set_link_access',
+  'Choose whether anyone with the link can view a file you own ("view", no account needed) or only invited people can open it ("none"). Only do this when the user asked for it.',
+  { fileId, linkAccess: z.enum(['none', 'view']) },
+  async ({ fileId, linkAccess }) => {
+    await convex.mutation(api.sharing.setLinkAccess, { fileId, linkAccess })
+    return ok({ linkAccess, url: fileUrl(fileId) })
+  },
+)
 
 tool('list_pages', 'List the pages of a file.', { fileId }, async ({ fileId }) => {
   const pages = (await convex.query(api.pages.list, { fileId })) as { _id: string; name: string; background?: string }[]
@@ -1129,8 +1227,9 @@ tool('resolve_comment', 'Mark a comment as resolved (or reopen it).', { commentI
 
 registerParity({
   tool: tool as never,
-  convex,
+  convex: convex as never,
   api,
+  authSource: () => currentToken(CONVEX_URL)?.source ?? null,
   loadPage,
   pageOfNodes,
   write,
@@ -1143,4 +1242,55 @@ registerParity({
   session: SESSION,
 })
 
-await server.connect(new StdioServerTransport())
+// ---------- transports ----------
+const httpFlag = process.argv.indexOf('--http')
+const httpPort = httpFlag >= 0 ? Number(process.argv[httpFlag + 1]) || 3333 : process.env.FIGMA_CLONE_HTTP_PORT ? Number(process.env.FIGMA_CLONE_HTTP_PORT) : 0
+
+if (!httpPort) await makeServer().connect(new StdioServerTransport())
+else {
+  // Streamable HTTP with OAuth: clients discover the authorization server through the protected-resource metadata,
+  // sign the user in there, and send the resulting bearer token with every request.
+  const base = (process.env.FIGMA_CLONE_PUBLIC_URL || `http://localhost:${httpPort}`).replace(/\/$/, '')
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version', 'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS', 'Access-Control-Expose-Headers': 'WWW-Authenticate, Mcp-Session-Id' }
+  const send = (res: import('node:http').ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => res.writeHead(status, { 'Content-Type': 'application/json', ...cors, ...headers }).end(JSON.stringify(body))
+  createServer(async (req, res) => {
+    try {
+      const path = new URL(req.url ?? '/', base).pathname
+      if (req.method === 'OPTIONS') return void res.writeHead(204, cors).end()
+      if (path.startsWith('/.well-known/oauth-protected-resource')) return void send(res, 200, { resource: `${base}/mcp`, authorization_servers: [SITE_URL], bearer_methods_supported: ['header'], scopes_supported: ['files'] })
+      if (path !== '/mcp') return void send(res, 404, { error: 'not_found' })
+      const challenge = { 'WWW-Authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"` }
+      const token = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1]
+      if (!token) return void send(res, 401, { error: 'unauthorized', error_description: 'Sign in required' }, challenge)
+      try {
+        if (!(await client.query(api.users.me as never, { token } as never))) throw new Error('unknown token')
+      } catch {
+        return void send(res, 401, { error: 'invalid_token', error_description: 'The access token is invalid, expired or revoked' }, { 'WWW-Authenticate': challenge['WWW-Authenticate'] + ', error="invalid_token"' })
+      }
+      let body: unknown
+      if (req.method === 'POST') {
+        const chunks: Buffer[] = []
+        for await (const c of req) chunks.push(c as Buffer)
+        try {
+          body = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null')
+        } catch {
+          return void send(res, 400, { jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' }, id: null })
+        }
+      }
+      // Stateless: a fresh server per request, bound to the caller's token for the duration of the call.
+      const server = makeServer()
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+      res.on('close', () => {
+        void transport.close()
+        void server.close()
+      })
+      for (const [k, v] of Object.entries(cors)) res.setHeader(k, v)
+      await requestToken.run(token, async () => {
+        await server.connect(transport)
+        await transport.handleRequest(req, res, body)
+      })
+    } catch (e) {
+      if (!res.headersSent) send(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: e instanceof Error ? e.message : 'Internal error' }, id: null })
+    }
+  }).listen(httpPort, () => console.error(`figma-clone MCP server listening on ${base}/mcp (authorization server: ${SITE_URL})`))
+}

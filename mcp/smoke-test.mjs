@@ -4,8 +4,55 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { writeFileSync } from 'node:fs'
 
-const client = new Client({ name: 'smoke-test', version: '1.0.0' })
-await client.connect(new StdioClientTransport({ command: 'node', args: ['mcp/dist/server.mjs'] }))
+import { ConvexHttpClient } from 'convex/browser'
+import { anyApi } from 'convex/server'
+import { spawn } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+
+// The backend requires an account: sign two test users up (or in) on the deployment and give each an API token.
+const envLocal = Object.fromEntries(
+  readFileSync('.env.local', 'utf8')
+    .split(/\r?\n/)
+    .map((l) => l.match(/^\s*([A-Z0-9_]+)\s*=\s*(\S+)/))
+    .filter(Boolean)
+    .map((m) => [m[1], m[2]]),
+)
+const CONVEX_URL = process.env.FIGMA_CLONE_CONVEX_URL || envLocal.VITE_CONVEX_URL
+const SITE_URL = CONVEX_URL.includes('.convex.cloud') ? CONVEX_URL.replace('.convex.cloud', '.convex.site') : envLocal.VITE_CONVEX_SITE_URL
+const sha = (t) => createHash('sha256').update(t).digest('hex')
+async function account(email, name) {
+  const c = new ConvexHttpClient(CONVEX_URL)
+  const params = { email, password: 'smoke-test-password-1' }
+  let r
+  try {
+    r = await c.action(anyApi.auth.signIn, { provider: 'password', params: { ...params, name, flow: 'signUp' } })
+  } catch {
+    r = await c.action(anyApi.auth.signIn, { provider: 'password', params: { ...params, flow: 'signIn' } })
+  }
+  c.setAuth(r.tokens.token)
+  for (const t of await c.query(anyApi.tokens.list, {})) await c.mutation(anyApi.tokens.revoke, { tokenId: t._id })
+  const token = 'fgc_' + randomBytes(32).toString('hex')
+  await c.mutation(anyApi.tokens.create, { name: 'smoke test', hash: sha(token), prefix: token.slice(0, 10) })
+  return { convex: c, token, email }
+}
+const alice = await account('smoke-alice@example.com', 'Smoke Alice')
+const bob = await account('smoke-bob@example.com', 'Smoke Bob')
+const serverEnv = (token) => {
+  const env = { ...process.env, FIGMA_CLONE_CONVEX_URL: CONVEX_URL }
+  delete env.FIGMA_CLONE_TOKEN
+  if (token) env.FIGMA_CLONE_TOKEN = token
+  // Keep the test away from any real saved login.
+  env.USERPROFILE = env.HOME = process.cwd() + '/mcp/dist/.smoke-home'
+  return env
+}
+const connect = async (token) => {
+  const c = new Client({ name: 'smoke-test', version: '1.0.0' })
+  await c.connect(new StdioClientTransport({ command: 'node', args: ['mcp/dist/server.mjs'], env: serverEnv(token) }))
+  return c
+}
+
+const client = await connect(alice.token)
 
 let failures = 0
 const call = async (name, args = {}) => {
@@ -337,6 +384,111 @@ await call('rename_project', { projectId: proj.projectId, name: 'Renamed project
 await call('delete_project', { projectId: proj.projectId })
 const { data: drafts } = await call('list_files', { draftsOnly: true })
 expect(drafts.some((f) => f.fileId === fileId), 'deleting a project turns its files into drafts')
+
+// ----- authorization -----
+const text = (res) => res.content.find((c) => c.type === 'text')?.text ?? ''
+const tryCall = (c, name, args = {}) => c.callTool({ name, arguments: args })
+const { data: who } = await call('whoami')
+expect(who.signedIn && who.email === alice.email && who.authenticatedVia.includes('API token'), `whoami reports the token's user (${who.email})`)
+const bobClient = await connect(bob.token)
+const bobFiles = JSON.parse(text(await tryCall(bobClient, 'list_files')))
+expect(!bobFiles.some((f) => f.fileId === fileId), 'another user does not see my files')
+expect((await tryCall(bobClient, 'get_tree', { fileId })).isError === true, 'another user cannot read my file')
+expect((await tryCall(bobClient, 'update_nodes', { fileId, updates: [{ id: card.id, name: 'hacked' }] })).isError === true, 'another user cannot edit my file')
+await call('share_file', { fileId, email: bob.email, role: 'viewer' })
+const sharedList = JSON.parse(text(await tryCall(bobClient, 'list_files')))
+expect(sharedList.some((f) => f.fileId === fileId && f.role === 'viewer' && f.sharedBy === 'Smoke Alice'), 'a shared file appears for the invited user as viewer')
+expect((await tryCall(bobClient, 'get_tree', { fileId })).isError !== true, 'a viewer can read')
+const viewerEdit = await tryCall(bobClient, 'update_nodes', { fileId, updates: [{ id: card.id, name: 'hacked' }] })
+expect(viewerEdit.isError === true && /view-only/.test(text(viewerEdit)), 'a viewer cannot edit')
+expect((await tryCall(bobClient, 'share_file', { fileId, email: 'x@example.com', role: 'editor' })).isError === true, 'only the owner can share')
+await call('share_file', { fileId, email: bob.email, role: 'editor' })
+expect((await tryCall(bobClient, 'update_nodes', { fileId, updates: [{ id: card.id, name: 'Card (edited by Bob)' }] })).isError !== true, 'an editor can edit')
+expect((await tryCall(bobClient, 'delete_project', { projectId: 'x' })).isError === true, 'editors cannot touch other people\'s projects')
+const { data: sharing } = await call('get_sharing', { fileId })
+expect(sharing.yourRole === 'owner' && sharing.people.length === 1 && sharing.people[0].role === 'editor', 'get_sharing lists people')
+await call('unshare_file', { fileId, email: bob.email })
+expect((await tryCall(bobClient, 'get_tree', { fileId })).isError === true, 'access ends when the share is removed')
+await call('set_link_access', { fileId, linkAccess: 'view' })
+const anon = new ConvexHttpClient(CONVEX_URL)
+const anonFile = await anon.query(anyApi.files.get, { fileId })
+expect(anonFile?.role === 'viewer' && anonFile.signedIn === false, 'link access lets signed-out visitors view')
+let anonEdit = 'ok'
+try {
+  await anon.mutation(anyApi.files.rename, { fileId, name: 'hacked' })
+} catch {
+  anonEdit = 'rejected'
+}
+expect(anonEdit === 'rejected', 'link visitors cannot edit')
+await call('set_link_access', { fileId, linkAccess: 'none' })
+expect((await anon.query(anyApi.files.get, { fileId })) === null, 'without link access the file is invisible to others')
+expect((await anon.query(anyApi.files.list, {})).length === 0, 'signed-out callers list nothing')
+await bobClient.close()
+
+const noAuth = await connect(null)
+const anonWho = JSON.parse(text(await tryCall(noAuth, 'whoami')))
+expect(anonWho.signedIn === false, 'without a token the server reports not signed in')
+const anonCreate = await tryCall(noAuth, 'create_file', { name: 'nope' })
+expect(anonCreate.isError === true && /login/.test(text(anonCreate)), 'unauthenticated calls fail and point to login')
+await noAuth.close()
+const badAuth = await connect('fgc_' + '0'.repeat(64))
+const badList = await tryCall(badAuth, 'list_files')
+expect(badList.isError === true && /Invalid, expired or revoked/.test(text(badList)), 'an invalid token is rejected')
+await badAuth.close()
+
+// ----- OAuth (authorization code + PKCE) and the HTTP transport -----
+const meta = await (await fetch(`${SITE_URL}/.well-known/oauth-authorization-server`)).json()
+expect(meta.token_endpoint === `${SITE_URL}/oauth/token` && meta.code_challenge_methods_supported.includes('S256'), 'authorization server metadata')
+const redirect = 'http://127.0.0.1:45871/callback'
+const reg = await (await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_name: 'Smoke OAuth client', redirect_uris: [redirect] }) })).json()
+expect(typeof reg.client_id === 'string', 'dynamic client registration')
+const badReg = await fetch(meta.registration_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_name: 'x', redirect_uris: ['http://evil.example/cb'] }) })
+expect(badReg.status === 400, 'non-loopback http redirect URIs are refused')
+const verifier = randomBytes(32).toString('base64url')
+const challenge = createHash('sha256').update(verifier).digest('base64url')
+const authz = await fetch(`${meta.authorization_endpoint}?${new URLSearchParams({ response_type: 'code', client_id: reg.client_id, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', state: 's1' })}`, { redirect: 'manual' })
+expect(authz.status === 302 && authz.headers.get('location').includes('#/oauth/authorize?'), `authorize redirects to the consent screen (${authz.headers.get('location')?.slice(0, 60)})`)
+const code = randomBytes(32).toString('hex')
+// What the consent screen does when the signed-in user clicks Allow:
+await alice.convex.mutation(anyApi.oauth.approve, { clientId: reg.client_id, redirectUri: redirect, codeChallenge: challenge, codeHash: sha(code) })
+const tokenReq = (v) => fetch(meta.token_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: v, client_id: reg.client_id, redirect_uri: redirect }) })
+const wrongVerifier = await tokenReq('wrong-verifier-wrong-verifier-wrong-verifier-123')
+expect(wrongVerifier.status === 400, 'a wrong PKCE verifier is rejected')
+await alice.convex.mutation(anyApi.oauth.approve, { clientId: reg.client_id, redirectUri: redirect, codeChallenge: challenge, codeHash: sha(code) })
+const tok = await (await tokenReq(verifier)).json()
+expect(typeof tok.access_token === 'string' && tok.token_type === 'Bearer', 'authorization code exchanged for an access token')
+expect((await tokenReq(verifier)).status === 400, 'an authorization code works only once')
+
+const port = 39000 + Math.floor(Math.random() * 500)
+const httpServer = spawn('node', ['mcp/dist/server.mjs', '--http', String(port)], { env: serverEnv(null), stdio: ['ignore', 'ignore', 'pipe'] })
+await new Promise((res) => httpServer.stderr.once('data', res))
+const mcpUrl = `http://localhost:${port}/mcp`
+const rpc = (token, body) => fetch(mcpUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) })
+const unauth = await rpc(null, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+expect(unauth.status === 401 && /resource_metadata=/.test(unauth.headers.get('www-authenticate') ?? ''), 'HTTP transport answers 401 with a pointer to the OAuth metadata')
+const prm = await (await fetch(`http://localhost:${port}/.well-known/oauth-protected-resource`)).json()
+expect(prm.authorization_servers[0] === SITE_URL, 'protected-resource metadata names the authorization server')
+expect((await rpc('fgc_bogus', { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status === 401, 'HTTP transport rejects unknown tokens')
+const parse = async (r) => {
+  const t = await r.text()
+  const line = t.split('\n').find((l) => l.startsWith('data:'))
+  return JSON.parse(line ? line.slice(5) : t)
+}
+const httpWho = await parse(await rpc(tok.access_token, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'whoami', arguments: {} } }))
+const httpUser = JSON.parse(httpWho.result.content[0].text)
+expect(httpUser.email === alice.email && httpUser.authenticatedVia === 'OAuth bearer token', `HTTP transport acts as the OAuth user (${httpUser.email})`)
+httpServer.kill()
+const oauthTokens = (await alice.convex.query(anyApi.tokens.list, {})).filter((t) => t.kind === 'oauth')
+expect(oauthTokens.length === 1 && oauthTokens[0].name === 'Smoke OAuth client', 'OAuth grant is listed among the user tokens')
+await alice.convex.mutation(anyApi.tokens.revoke, { tokenId: oauthTokens[0]._id })
+const revoked = new ConvexHttpClient(CONVEX_URL)
+let revokedResult = 'ok'
+try {
+  await revoked.query(anyApi.files.list, { token: tok.access_token })
+} catch {
+  revokedResult = 'rejected'
+}
+expect(revokedResult === 'rejected', 'a revoked token stops working')
 
 const { res: bad } = await client.callTool({ name: 'get_nodes', arguments: { fileId, ids: ['nope'] } }).then((res) => ({ res }))
 expect(bad.isError === true, 'unknown ids produce a tool error')

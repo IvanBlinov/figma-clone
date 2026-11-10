@@ -2,7 +2,9 @@
   "mcpServers": {
     "figma-clone": {
       "command": "node",
-      "args": ["mcp/dist/server.mjs"],
+      "args": [
+        "mcp/dist/server.mjs"
+      ],
       "env": {
         "FIGMA_CLONE_CONVEX_URL": "https://adorable-magpie-715.convex.cloud",
         "FIGMA_CLONE_APP_URL": "https://ivanblinov.github.io/figma-clone"

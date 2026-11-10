@@ -35,7 +35,7 @@ export function setTextSel(start: number, end: number, keepGoal = false) {
 
 export function startTextEdit(id: string) {
   const n = S().doc.byId.get(id)
-  if (!n) return
+  if (!n || S().readOnly) return
   orig = { id, name: n.name, characters: n.characters ?? '' }
   const len = (n.characters ?? '').length
   patchState({ editingId: id, selection: [id], vedit: null, textSel: { start: 0, end: len }, caretOn: true })

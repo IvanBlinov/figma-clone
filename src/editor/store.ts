@@ -82,6 +82,8 @@ export interface EditorState {
   /** Prototype connection being dragged. */
   protoDrag: { from: string; to: Pt; target: string | null } | null
   paletteOpen: boolean
+  /** The viewer may look but not change the document. */
+  readOnly: boolean
   uiHidden: boolean
   spaceDown: boolean
   showComments: boolean
@@ -121,6 +123,7 @@ export const useEditor = create<EditorState>(() => ({
   altDown: false,
   protoDrag: null,
   paletteOpen: false,
+  readOnly: false,
   uiHidden: false,
   spaceDown: false,
   showComments: true,
@@ -166,7 +169,7 @@ function scheduleLayoutSync() {
   clearTimeout(syncTimer)
   syncTimer = setTimeout(() => {
     const st = S()
-    if (Object.keys(st.draft).length || st.draftNew.length || fontsPending() || !st.pageId) return
+    if (Object.keys(st.draft).length || st.draftNew.length || fontsPending() || !st.pageId || st.readOnly) return
     const { patches } = runLayout(st.raw, measureText)
     if (!patches.length) return
     const ops: Op[] = patches.map((p) => ({ op: 'update', id: p.id, patch: p.patch as Record<string, unknown> }))
@@ -267,6 +270,7 @@ function applyLocal(ops: Op[], selection?: string[]) {
 export function commit(ops: Op[], opts: { select?: string[]; history?: boolean } = {}) {
   const st = S()
   if (!st.pageId) return
+  if (st.readOnly) return clearDraft()
   if (!ops.length) {
     clearDraft()
     if (opts.select) set({ selection: opts.select })
@@ -335,7 +339,10 @@ export function resetEditor() {
 }
 
 export const select = (ids: string[]) => set({ selection: ids })
-export const setTool = (tool: Tool) => set({ tool, pen: null, pencil: null, vedit: null })
+export const setTool = (tool: Tool) => {
+  if (S().readOnly && tool !== 'move' && tool !== 'hand' && tool !== 'comment') return
+  set({ tool, pen: null, pencil: null, vedit: null })
+}
 export const patchState = set
 
 export const screenToWorld = (sx: number, sy: number, vp = S().viewport): Pt => ({

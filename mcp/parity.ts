@@ -28,6 +28,7 @@ export interface ParityDeps {
   tool: (name: string, description: string, shape: any, handler: (args: any) => Promise<{ content: unknown[] }>) => void
   convex: { query: (fn: any, args: any) => Promise<any>; mutation: (fn: any, args: any) => Promise<any> }
   api: any
+  authSource: () => string | null
   loadPage: (fileId: string, pageId?: string) => Promise<PageCtx>
   pageOfNodes: (fileId: string, ids: string[]) => Promise<PageCtx>
   write: (ctx: PageCtx, ops: Op[], touched?: string[]) => Promise<DocIndex>
@@ -101,10 +102,22 @@ export function registerParity(d: ParityDeps) {
   const mappingsOf = async (fileId: string) => (await convex.query(api.library.codeConnectList, { fileId })) as { nodeId: string; componentName: string; source: string; label: string; template?: string }[]
 
   // ---------- identity / sessions / files ----------
-  tool('whoami', 'Who the agent is acting as and which workspace it is connected to. There are no accounts, plans or seats here: every client has full access to the local workspace.', {}, async () => {
+  tool('whoami', 'Which user this server is acting as, how it is authenticated, and which workspace it is connected to. You can see and edit the files that user owns or was invited to. If signedIn is false, call login.', {}, async () => {
+    const user = await convex.query(api.users.me, {})
+    if (!user) return ok({ signedIn: false, backend: d.convexUrl, app: d.appUrl, message: 'Not signed in. Call the login tool (browser sign-in), or set FIGMA_CLONE_TOKEN to an API token from Account → API tokens in the app.' })
     const files = await convex.query(api.files.list, {})
     const projects = await convex.query(api.projects.list, {})
-    return ok({ handle: d.agentName, email: null, backend: d.convexUrl, app: d.appUrl, plans: [{ key: 'local', name: 'Local workspace', seat: 'full' }], files: files.length, projects: projects.map((p: any) => ({ projectId: p._id, name: p.name })) })
+    return ok({
+      signedIn: true,
+      handle: user.name,
+      email: user.email,
+      authenticatedVia: d.authSource() === 'env' ? 'API token (FIGMA_CLONE_TOKEN)' : d.authSource() === 'request' ? 'OAuth bearer token' : 'browser sign-in (login)',
+      backend: d.convexUrl,
+      app: d.appUrl,
+      files: files.length,
+      sharedWithMe: files.filter((f: any) => f.role !== 'owner').length,
+      projects: projects.map((p: any) => ({ projectId: p._id, name: p.name })),
+    })
   })
 
   tool(

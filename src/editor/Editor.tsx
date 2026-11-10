@@ -3,6 +3,7 @@ import { Bot, Check, ChevronDown, Menu as MenuIcon, Play, Trash2, X } from 'luci
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
+import { AuthForm, ShareDialog } from '../Account'
 import { applyOpsToList } from '../../shared/doc'
 import type { Pt } from '../../shared/geometry'
 import type { Op, SceneNode } from '../../shared/types'
@@ -68,13 +69,17 @@ interface Menu {
 }
 
 export function Editor({ fileId }: { fileId: Id<'files'> }) {
+  // `file` is null when it does not exist or the viewer has no access; nothing else is requested until it loads.
   const file = useQuery(api.files.get, { fileId })
-  const pages = useQuery(api.pages.list, { fileId })
+  const account = useQuery(api.users.me, {})
+  const open = file ? { fileId } : 'skip'
+  const pages = useQuery(api.pages.list, open)
   const [pageId, setPageId] = useState<Id<'pages'> | null>(null)
-  const nodes = useQuery(api.nodes.list, pageId ? { pageId } : 'skip') as SceneNode[] | undefined
-  const presence = useQuery(api.presence.list, { fileId })
-  const comments = useQuery(api.comments.list, { fileId })
-  const command = useQuery(api.commands.latest, { fileId })
+  const nodes = useQuery(api.nodes.list, file && pageId ? { pageId } : 'skip') as SceneNode[] | undefined
+  const presence = useQuery(api.presence.list, open)
+  const comments = useQuery(api.comments.list, open)
+  const command = useQuery(api.commands.latest, open)
+  const readOnly = file?.role === 'viewer'
 
   const applyOps = useMutation(api.nodes.applyOps).withOptimisticUpdate((store, args) => {
     const cur = store.getQuery(api.nodes.list, { pageId: args.pageId })
@@ -93,21 +98,27 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
   const replyComment = useMutation(api.comments.reply)
   const resolveComment = useMutation(api.comments.setResolved)
   const removeComment = useMutation(api.comments.remove)
-  const projects = useQuery(api.projects.list)
-  const styles = useQuery(api.styles.list, { fileId })
+  const projects = useQuery(api.projects.list, {})
+  const styles = useQuery(api.styles.list, open)
   const createStyle = useMutation(api.styles.create)
   const updateStyle = useMutation(api.styles.update)
   const removeStyle = useMutation(api.styles.remove)
   const saveVersion = useMutation(api.versions.save)
 
-  const user = useMemo(me, [])
+  const guest = useMemo(me, [])
+  // Signed-in people appear under their own name; link visitors get a random guest name.
+  const user = useMemo(
+    () => (account ? { name: account.name, color: COLORS[[...account._id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % COLORS.length] } : guest),
+    [account, guest],
+  )
+  const [shareOpen, setShareOpen] = useState(false)
+  const [signInOpen, setSignInOpen] = useState(false)
   const sessionId = useMemo(() => Math.random().toString(36).slice(2) + Date.now().toString(36), [])
   const [menu, setMenu] = useState<Menu | null>(null)
   const [zoomMenu, setZoomMenu] = useState(false)
   const [draftComment, setDraftComment] = useState<Pt | null>(null)
   const [openComment, setOpenComment] = useState<string | null>(null)
   const [now, setNow] = useState(Date.now())
-  const [copied, setCopied] = useState(false)
   const [fileMenu, setFileMenu] = useState(false)
   const [versionsOpen, setVersionsOpen] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
@@ -119,6 +130,13 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
   const uiHidden = useEditor((s) => s.uiHidden)
   const zoom = useEditor((s) => s.viewport.zoom)
   const tool = useEditor((s) => s.tool)
+
+  useEffect(() => {
+    patchState({ readOnly, ...(readOnly ? { mode: 'inspect' as const, tool: 'move' as const } : S().mode === 'inspect' && S().readOnly ? { mode: 'design' as const } : {}) })
+  }, [readOnly])
+  useEffect(() => {
+    if (account) setSignInOpen(false)
+  }, [account])
 
   // ----- page selection -----
   useEffect(() => {
@@ -155,7 +173,7 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
   useEffect(() => installShortcuts(), [])
   useEffect(() => {
     bindUploader(async (blob) => {
-      const url = await genUpload()
+      const url = await genUpload({})
       const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': blob.type || 'application/octet-stream' }, body: blob })
       const { storageId } = await res.json()
       const served = await getUrl({ storageId })
@@ -219,7 +237,7 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
     let last: unknown = null
     const push = () => {
       const st = S()
-      if (st.raw === last || !st.raw.length || !pages || pageId !== pages[0]?._id) return
+      if (st.raw === last || !st.raw.length || !pages || pageId !== pages[0]?._id || st.readOnly) return
       last = st.raw
       const t = makeThumbnail()
       if (t) void setThumbnail({ fileId, thumbnail: t })
@@ -287,7 +305,16 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
     dirty.current = true
   }, [])
 
-  if (file === null) return <div className="center-msg">This file does not exist. <a href="#/">Back to files</a></div>
+  if (file === null)
+    return account === null ? (
+      <div className="auth-screen">
+        <AuthForm note="Sign in to open this file. If it was shared with you, use the email address the invitation was sent to." />
+      </div>
+    ) : (
+      <div className="center-msg">
+        This file does not exist, or {account?.email ?? 'your account'} has not been given access to it. <a href="#/">Back to your files</a>
+      </div>
+    )
   const pageComments = (comments ?? []).filter((c) => c.pageId === pageId)
 
   return (
@@ -298,7 +325,7 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
             <Logo />
           </a>
           <div className="file-title">
-            <TextInput className="file-name" value={file?.name ?? ''} onCommit={(name) => name.trim() && void renameFile({ fileId, name: name.trim() })} />
+            <TextInput className="file-name" value={file?.name ?? ''} onCommit={(name) => name.trim() && !readOnly && void renameFile({ fileId, name: name.trim() })} />
             <span className="sub">{projects?.find((p) => p._id === file?.projectId)?.name ?? 'Drafts'}</span>
           </div>
           <div className="file-menu-wrap">
@@ -329,9 +356,9 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
           pages={pages ?? []}
           pageId={pageId}
           onSelectPage={(id) => setPageId(id as Id<'pages'>)}
-          onAddPage={async () => setPageId(await createPage({ fileId }))}
-          onRenamePage={(id, name) => void updatePage({ pageId: id as Id<'pages'>, name })}
-          onDeletePage={(id) => void removePage({ pageId: id as Id<'pages'> })}
+          onAddPage={async () => !readOnly && setPageId(await createPage({ fileId }))}
+          onRenamePage={(id, name) => !readOnly && void updatePage({ pageId: id as Id<'pages'>, name })}
+          onDeletePage={(id) => !readOnly && void removePage({ pageId: id as Id<'pages'> })}
         />
       </aside>
 
@@ -340,6 +367,10 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
           remotes={remotes}
           onCursor={onCursor}
           onCommentAt={(p) => {
+            if (!account) {
+              setTool('move')
+              return setSignInOpen(true)
+            }
             setOpenComment(null)
             setDraftComment(p)
           }}
@@ -381,16 +412,15 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
           <button className="icon-btn present" title="Present prototype" onClick={() => present()}>
             <Play size={15} />
           </button>
-          <button
-            className="btn primary"
-            onClick={() => {
-              void navigator.clipboard?.writeText(location.href)
-              setCopied(true)
-              setTimeout(() => setCopied(false), 1500)
-            }}
-          >
-            {copied ? 'Link copied' : 'Share'}
-          </button>
+          {account ? (
+            <button className="btn primary" onClick={() => setShareOpen(true)}>
+              Share
+            </button>
+          ) : (
+            <button className="btn primary" onClick={() => setSignInOpen(true)}>
+              Sign in
+            </button>
+          )}
           <div className="zoom">
             <button className="zoom-btn" onClick={() => setZoomMenu((z) => !z)}>
               {Math.round(zoom * 100)}% <ChevronDown size={10} />
@@ -415,7 +445,7 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
           </div>
         </div>
         <div className="tabs">
-          {(['design', 'prototype', 'inspect'] as const).map((m) => (
+          {(readOnly ? (['inspect'] as const) : (['design', 'prototype', 'inspect'] as const)).map((m) => (
             <span key={m} className={'tab' + (mode === m ? ' active' : '')} onClick={() => patchState({ mode: m, protoDrag: null })}>
               {m[0].toUpperCase() + m.slice(1)}
             </span>
@@ -428,6 +458,15 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
 
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} say={say} />}
       {paletteOpen && <Palette commands={commands} />}
+      {shareOpen && <ShareDialog fileId={fileId} onClose={() => setShareOpen(false)} />}
+      {signInOpen && (
+        <>
+          <div className="popover-backdrop dim" onPointerDown={() => setSignInOpen(false)} />
+          <div className="modal bare" onKeyDown={(e) => e.stopPropagation()}>
+            <AuthForm note="Sign in to comment, or to edit if you were invited." />
+          </div>
+        </>
+      )}
       {versionsOpen && <VersionsModal fileId={fileId} author={user.name} onClose={() => setVersionsOpen(false)} />}
     </div>
   )

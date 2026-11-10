@@ -90,7 +90,7 @@ function smartIndex(ix: DocIndex, fromId: string, toId: string, t: number): DocI
 
 export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageId?: string; frameId?: string }) {
   const file = useQuery(api.files.get, { fileId })
-  const pages = useQuery(api.pages.list, { fileId })
+  const pages = useQuery(api.pages.list, file ? { fileId } : 'skip')
   const page = pages?.find((p) => p._id === pageId) ?? pages?.[0]
   const stored = useQuery(api.nodes.list, page ? { pageId: page._id } : 'skip') as SceneNode[] | undefined
   const [tick, setTick] = useState(0)
@@ -426,6 +426,16 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     if (hov && hov !== 'outside' && id && !st.anim) run(hov.r, hov.id)
   }
 
+  if (file === null)
+    return (
+      <div className="player">
+        <div className="player-empty">
+          <span>
+            This prototype does not exist, or you do not have access to it. <a href="#/">Sign in</a>
+          </span>
+        </div>
+      </div>
+    )
   const index = doc && current ? doc.frames.indexOf(current) : -1
   const name = doc && current ? doc.ix.byId.get(current)?.name : ''
   return (

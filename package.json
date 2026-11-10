@@ -14,6 +14,8 @@
     "deploy:backend": "convex deploy"
   },
   "dependencies": {
+    "@auth/core": "^0.41.3",
+    "@convex-dev/auth": "^0.0.98",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@resvg/resvg-js": "^2.6.2",
     "convex": "^1.49.0",

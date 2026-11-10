@@ -27,7 +27,32 @@ npm run build:mcp     # bundle the MCP server → mcp/dist/server.mjs
 Deploy the backend before pushing frontend changes that depend on new backend functions. Local development
 talks to the separate dev deployment, so it never touches production data.
 
-The backend has **no authentication**: anyone who opens the site can view, edit and delete every file.
+## Accounts and access
+
+- **Sign-in**: email + password (Convex Auth). There is no email verification or password reset by email.
+- **Ownership**: every file and project belongs to the account that created it; nobody else can see it.
+- **Sharing**: the owner can invite people by email as editor or viewer (Share button in the editor), or turn on
+  "anyone with the link can view", which also works signed out. Viewers get a read-only editor and can comment
+  once signed in. Shared files appear under "Shared with me".
+- **Enforcement** is on the backend: every Convex function checks the caller's role (`convex/access.ts`), so the
+  rules hold for the app, the MCP server and anyone calling the API directly.
+
+### Agents (MCP)
+
+The MCP server acts as one user and can reach exactly the files that user can. Three ways to authenticate:
+
+| Method | How |
+| --- | --- |
+| Browser sign-in (OAuth) | Call the `login` tool: it opens the app's consent page, you approve, and the token is cached in `~/.figma-clone/credentials.json`. `logout` forgets it. |
+| API token | In the app: Account (key icon, bottom left) → API tokens → Create token, then set `FIGMA_CLONE_TOKEN` in the MCP config. Shown once; stored only as a hash. |
+| Remote MCP over HTTP | `node mcp/dist/server.mjs --http 3333` serves `/mcp` (Streamable HTTP). Clients discover the authorization server from `/.well-known/oauth-protected-resource` and sign the user in with standard OAuth 2.1 (authorization code + PKCE, dynamic client registration). Set `FIGMA_CLONE_PUBLIC_URL` when it is reachable under another address. |
+
+Both kinds of token can be revoked under Account → API tokens. The OAuth endpoints are served by the Convex
+deployment (`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`, `/oauth/token`).
+
+A deployment needs three environment variables: `JWT_PRIVATE_KEY` and `JWKS` (signing keys for sessions) and
+`SITE_URL` (where the frontend is served). `node scripts/setup-auth-env.mjs` generates and sets them for the dev
+deployment, `node scripts/setup-auth-env.mjs --prod` for production.
 
 ## Connect an agent (MCP)
 
@@ -52,7 +77,9 @@ shows up as a collaborator with its own cursor, and `set_selection` scrolls your
 
 | Tool | Purpose |
 | --- | --- |
+| `login`, `logout`, `whoami` | Sign in through the browser, and see who the server is acting as |
 | `list_files`, `create_file`, `rename_file`, `move_file` | Files |
+| `get_sharing`, `share_file`, `unshare_file`, `set_link_access` | Who can open a file |
 | `list_projects`, `create_project`, `rename_project`, `delete_project` | Projects (a file without a project is a draft) |
 | `list_pages`, `create_page`, `update_page`, `delete_page` | Pages (name, canvas background) |
 | `get_tree`, `get_nodes`, `find_nodes` | Read the layer tree, full node properties, search by name/type/text |
@@ -91,7 +118,9 @@ Not available, because they depend on Figma's hosted services or products that d
 `generate_vector_illustration`, the shader, generative-plugin and Weave tools, `export_video` and
 `get_motion_context` (no animation timeline), FigJam and Slides files, and real variables with modes.
 
-`node mcp/smoke-test.mjs` exercises every tool end to end against the running backend.
+`node mcp/smoke-test.mjs` exercises every tool end to end against the dev deployment, including the access rules,
+the OAuth flow and the HTTP transport. It signs up two throwaway accounts (`smoke-alice@example.com`,
+`smoke-bob@example.com`) there.
 
 ## Editor features
 
@@ -159,4 +188,4 @@ mcp/       stdio MCP server (talks to Convex over HTTP, renders PNGs with resvg)
 
 Variables and modes, component properties (beyond variants and overrides), instances that follow a component on
 another page, interactive components, scrolling / fixed layers in prototypes, plugins, Dev Mode annotations,
-branching, team libraries, and authentication (the local backend is open to anything that can reach it).
+branching, team libraries, teams / organisations, email verification and password reset.

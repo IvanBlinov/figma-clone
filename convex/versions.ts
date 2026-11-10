@@ -1,10 +1,12 @@
 import { mutation, query, type MutationCtx } from './_generated/server'
 import { v } from 'convex/values'
 import type { Id } from './_generated/dataModel'
+import { fileAccess, tokenArg } from './access'
 
 export const list = query({
-  args: { fileId: v.id('files') },
-  handler: async (ctx, { fileId }) => {
+  args: { fileId: v.id('files'), ...tokenArg },
+  handler: async (ctx, { fileId, token }) => {
+    await fileAccess(ctx, fileId, token, 'view')
     const rows = await ctx.db
       .query('versions')
       .withIndex('by_file', (q) => q.eq('fileId', fileId))
@@ -42,20 +44,21 @@ async function snapshot(ctx: MutationCtx, fileId: Id<'files'>, label: string, au
 }
 
 export const save = mutation({
-  args: { fileId: v.id('files'), label: v.optional(v.string()), author: v.optional(v.string()) },
-  handler: async (ctx, { fileId, label, author }) => {
-    if (!(await ctx.db.get(fileId))) throw new Error('File not found')
+  args: { fileId: v.id('files'), label: v.optional(v.string()), author: v.optional(v.string()), ...tokenArg },
+  handler: async (ctx, { fileId, label, author, token }) => {
+    await fileAccess(ctx, fileId, token, 'edit')
     return snapshot(ctx, fileId, label?.trim() || 'Untitled version', author)
   },
 })
 
 /** Replace the file's pages and layers with a saved version. The current state is saved first so it can be brought back. */
 export const restore = mutation({
-  args: { versionId: v.id('versions'), author: v.optional(v.string()) },
-  handler: async (ctx, { versionId, author }) => {
+  args: { versionId: v.id('versions'), author: v.optional(v.string()), ...tokenArg },
+  handler: async (ctx, { versionId, author, token }) => {
     const version = await ctx.db.get(versionId)
     if (!version) throw new Error('Version not found')
     const fileId = version.fileId
+    await fileAccess(ctx, fileId, token, 'edit')
     await snapshot(ctx, fileId, `Before restoring "${version.label}"`, author)
     const current = await ctx.db
       .query('pages')
@@ -95,8 +98,11 @@ export const restore = mutation({
 })
 
 export const remove = mutation({
-  args: { versionId: v.id('versions') },
-  handler: async (ctx, { versionId }) => {
+  args: { versionId: v.id('versions'), ...tokenArg },
+  handler: async (ctx, { versionId, token }) => {
+    const version = await ctx.db.get(versionId)
+    if (!version) return
+    await fileAccess(ctx, version.fileId, token, 'edit')
     const nodes = await ctx.db
       .query('versionNodes')
       .withIndex('by_version', (q) => q.eq('versionId', versionId))

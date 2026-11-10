@@ -7,7 +7,7 @@ import { cloneSubs, editSubs, flatPoints, hasHandles, rebound } from './vectorEd
 
 export function enterVectorEdit(id: string) {
   const n = S().doc.byId.get(id)
-  if (!n || n.type !== 'VECTOR' || n.locked) return
+  if (!n || n.type !== 'VECTOR' || n.locked || S().readOnly) return
   patchState({ vedit: { id, sel: [] }, selection: [id], editingId: null, tool: 'move' })
 }
 

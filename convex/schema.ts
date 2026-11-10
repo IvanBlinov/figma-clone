@@ -1,18 +1,66 @@
+import { authTables } from '@convex-dev/auth/server'
 import { defineSchema, defineTable } from 'convex/server'
 import { v } from 'convex/values'
 
 export default defineSchema({
-  // Projects group files; a file without a project is a draft.
+  // users, sessions and accounts (email + password) managed by Convex Auth.
+  ...authTables,
+  // Projects group files; a file without a project is a draft. Projects are private to their owner.
   projects: defineTable({
     name: v.string(),
     createdAt: v.number(),
-  }),
+    ownerId: v.optional(v.id('users')),
+  }).index('by_owner', ['ownerId']),
   files: defineTable({
     name: v.string(),
     updatedAt: v.number(),
     thumbnail: v.optional(v.string()),
     projectId: v.optional(v.id('projects')),
-  }).index('by_project', ['projectId']),
+    ownerId: v.optional(v.id('users')),
+    // 'view' = anyone with the link can open the file read-only (even signed out).
+    linkAccess: v.optional(v.string()),
+  })
+    .index('by_project', ['projectId'])
+    .index('by_owner', ['ownerId']),
+  // People a file is shared with, by (lower-cased) email so invitations work before the person signs up.
+  shares: defineTable({
+    fileId: v.id('files'),
+    email: v.string(),
+    role: v.string(), // 'editor' | 'viewer'
+    invitedBy: v.id('users'),
+    createdAt: v.number(),
+  })
+    .index('by_file_email', ['fileId', 'email'])
+    .index('by_email', ['email']),
+  // Access tokens for agents: personal API tokens and tokens issued through the OAuth flow.
+  // Only the SHA-256 hash is stored.
+  apiTokens: defineTable({
+    userId: v.id('users'),
+    name: v.string(),
+    hash: v.string(),
+    prefix: v.string(),
+    kind: v.string(), // 'pat' | 'oauth'
+    clientId: v.optional(v.string()),
+    createdAt: v.number(),
+    expiresAt: v.optional(v.number()),
+  })
+    .index('by_hash', ['hash'])
+    .index('by_user', ['userId']),
+  // OAuth 2.1 public clients (dynamic registration) and pending authorization codes (PKCE).
+  oauthClients: defineTable({
+    clientId: v.string(),
+    name: v.string(),
+    redirectUris: v.array(v.string()),
+    createdAt: v.number(),
+  }).index('by_client', ['clientId']),
+  oauthCodes: defineTable({
+    hash: v.string(),
+    userId: v.id('users'),
+    clientId: v.string(),
+    redirectUri: v.string(),
+    codeChallenge: v.string(),
+    expiresAt: v.number(),
+  }).index('by_hash', ['hash']),
   pages: defineTable({
     fileId: v.id('files'),
     name: v.string(),
@@ -49,6 +97,7 @@ export default defineSchema({
     x: v.number(),
     y: v.number(),
     author: v.string(),
+    userId: v.optional(v.id('users')),
     color: v.optional(v.string()),
     text: v.string(),
     resolved: v.boolean(),

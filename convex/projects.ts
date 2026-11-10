@@ -1,47 +1,69 @@
 import { mutation, query } from './_generated/server'
-import { v } from 'convex/values'
+import { ConvexError, v } from 'convex/values'
+import type { Id } from './_generated/dataModel'
+import type { MutationCtx } from './_generated/server'
+import { requireUser, tokenArg, viewerId } from './access'
 
+/** The caller's projects with file counts and a few thumbnails. */
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const projects = await ctx.db.query('projects').collect()
-    const files = await ctx.db.query('files').collect()
-    return projects
-      .map((p) => {
-        const own = files.filter((f) => f.projectId === p._id)
-        return {
-          _id: p._id,
-          name: p.name,
-          createdAt: p.createdAt,
-          fileCount: own.length,
-          updatedAt: own.reduce((m, f) => Math.max(m, f.updatedAt), p.createdAt),
-          // A few previews for the project card.
-          thumbnails: own
-            .sort((a, b) => b.updatedAt - a.updatedAt)
-            .slice(0, 4)
-            .map((f) => f.thumbnail ?? null),
-        }
+  args: { ...tokenArg },
+  handler: async (ctx, { token }) => {
+    const userId = await viewerId(ctx, token)
+    if (!userId) return []
+    const projects = await ctx.db
+      .query('projects')
+      .withIndex('by_owner', (q) => q.eq('ownerId', userId))
+      .collect()
+    const out = []
+    for (const p of projects) {
+      const own = await ctx.db
+        .query('files')
+        .withIndex('by_project', (q) => q.eq('projectId', p._id))
+        .collect()
+      out.push({
+        _id: p._id,
+        name: p.name,
+        createdAt: p.createdAt,
+        fileCount: own.length,
+        updatedAt: own.reduce((m, f) => Math.max(m, f.updatedAt), p.createdAt),
+        thumbnails: own
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .slice(0, 4)
+          .map((f) => f.thumbnail ?? null),
       })
-      .sort((a, b) => a.name.localeCompare(b.name))
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name))
   },
 })
 
 export const create = mutation({
-  args: { name: v.optional(v.string()) },
-  handler: async (ctx, { name }) => ctx.db.insert('projects', { name: name?.trim() || 'Untitled project', createdAt: Date.now() }),
+  args: { name: v.optional(v.string()), ...tokenArg },
+  handler: async (ctx, { name, token }) => {
+    const userId = await requireUser(ctx, token)
+    return ctx.db.insert('projects', { name: name?.trim() || 'Untitled project', createdAt: Date.now(), ownerId: userId })
+  },
 })
 
+async function own(ctx: MutationCtx, projectId: Id<'projects'>, token?: string) {
+  const userId = await requireUser(ctx, token)
+  const project = await ctx.db.get(projectId)
+  if (!project || project.ownerId !== userId) throw new ConvexError('Project not found')
+  return project
+}
+
 export const rename = mutation({
-  args: { projectId: v.id('projects'), name: v.string() },
-  handler: async (ctx, { projectId, name }) => {
+  args: { projectId: v.id('projects'), name: v.string(), ...tokenArg },
+  handler: async (ctx, { projectId, name, token }) => {
+    await own(ctx, projectId, token)
     if (name.trim()) await ctx.db.patch(projectId, { name: name.trim() })
   },
 })
 
 /** Delete a project. Its files are kept and become drafts. */
 export const remove = mutation({
-  args: { projectId: v.id('projects') },
-  handler: async (ctx, { projectId }) => {
+  args: { projectId: v.id('projects'), ...tokenArg },
+  handler: async (ctx, { projectId, token }) => {
+    await own(ctx, projectId, token)
     const files = await ctx.db
       .query('files')
       .withIndex('by_project', (q) => q.eq('projectId', projectId))

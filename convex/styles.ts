@@ -1,19 +1,25 @@
 import { mutation, query, type MutationCtx } from './_generated/server'
 import { v } from 'convex/values'
 import type { Id } from './_generated/dataModel'
+import { fileAccess, tokenArg } from './access'
 
 export const list = query({
-  args: { fileId: v.id('files') },
-  handler: async (ctx, { fileId }) =>
-    ctx.db
+  args: { fileId: v.id('files'), ...tokenArg },
+  handler: async (ctx, { fileId, token }) => {
+    await fileAccess(ctx, fileId, token, 'view')
+    return ctx.db
       .query('styles')
       .withIndex('by_file', (q) => q.eq('fileId', fileId))
-      .collect(),
+      .collect()
+  },
 })
 
 export const create = mutation({
-  args: { fileId: v.id('files'), kind: v.union(v.literal('PAINT'), v.literal('TEXT')), name: v.string(), value: v.any() },
-  handler: async (ctx, args) => ctx.db.insert('styles', args),
+  args: { fileId: v.id('files'), kind: v.union(v.literal('PAINT'), v.literal('TEXT')), name: v.string(), value: v.any(), ...tokenArg },
+  handler: async (ctx, { token, ...args }) => {
+    await fileAccess(ctx, args.fileId, token, 'edit')
+    return ctx.db.insert('styles', args)
+  },
 })
 
 /** Push a style's value into (or unlink it from) every node of the file that references it. */
@@ -47,10 +53,11 @@ async function propagate(ctx: MutationCtx, fileId: Id<'files'>, styleId: string,
 }
 
 export const update = mutation({
-  args: { styleId: v.id('styles'), name: v.optional(v.string()), value: v.optional(v.any()) },
-  handler: async (ctx, { styleId, name, value }) => {
+  args: { styleId: v.id('styles'), name: v.optional(v.string()), value: v.optional(v.any()), ...tokenArg },
+  handler: async (ctx, { styleId, name, value, token }) => {
     const style = await ctx.db.get(styleId)
     if (!style) throw new Error('Style not found')
+    await fileAccess(ctx, style.fileId, token, 'edit')
     await ctx.db.patch(styleId, { ...(name !== undefined ? { name } : {}), ...(value !== undefined ? { value } : {}) })
     if (value !== undefined) {
       await propagate(ctx, style.fileId, styleId, style.kind, value)
@@ -60,10 +67,11 @@ export const update = mutation({
 })
 
 export const remove = mutation({
-  args: { styleId: v.id('styles') },
-  handler: async (ctx, { styleId }) => {
+  args: { styleId: v.id('styles'), ...tokenArg },
+  handler: async (ctx, { styleId, token }) => {
     const style = await ctx.db.get(styleId)
     if (!style) return
+    await fileAccess(ctx, style.fileId, token, 'edit')
     await propagate(ctx, style.fileId, styleId, style.kind, null)
     await ctx.db.delete(styleId)
   },
