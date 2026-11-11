@@ -71,10 +71,13 @@ from `/.well-known/oauth-protected-resource`). Clients without OAuth support can
 `--header "Authorization: Bearer <token>"`, or in JSON
 `{ "type": "http", "url": "…/mcp", "headers": { "Authorization": "Bearer <token>" } }`.
 
-Differences from the local server: `use_figma` is not offered (it runs caller-supplied JavaScript, which is not safe
-on a shared server), `login` / `logout` are not needed, `upload_assets` takes `url`, `base64` or `svg` but no
-local `path`, and PNG exports draw every font family as Inter. `node mcp/hosted-test.mjs` checks the endpoint of the
-dev deployment.
+Differences from the local server: `login` / `logout` are not needed, `upload_assets` takes no local `path`
+(send files through `create_upload_urls`, or as `url` / `svg`), and PNG exports draw every font family as Inter.
+`node mcp/hosted-test.mjs` checks the endpoint of the dev deployment.
+
+`use_figma` scripts run in QuickJS compiled to WebAssembly (`mcp/sandbox.ts`): a separate JavaScript engine with no
+access to Node, the network or the server's environment, limited to 15 seconds and 128 MB. The Plugin API shim runs
+inside it too (bundled by `scripts/build-sandbox.mjs`), and only JSON crosses the boundary.
 
 ### Local (stdio)
 
@@ -112,7 +115,7 @@ shows up as a collaborator with its own cursor, and `set_selection` scrolls your
 | `add_interaction`, `get_prototype_url` | Prototype links between layers and frames, and the URL that plays them |
 | `list_styles`, `create_style`, `update_style`, `delete_style`, `apply_style` | Shared color and text styles |
 | `save_version`, `list_versions`, `restore_version` | Version history |
-| `export_image` | Render a page or nodes to PNG/SVG so the agent can *see* its work |
+| `export_image` | Render a page (pass its id) or nodes to PNG/SVG so the agent can *see* its work; every image is downloaded first, and the result names any that could not be drawn |
 | `get_css` | CSS for a node (design → code) |
 | `get_selection`, `set_selection` | Read what the user has selected; select + zoom in open editors |
 | `list_comments`, `add_comment`, `reply_comment`, `resolve_comment` | Canvas comments |
@@ -131,7 +134,7 @@ The server also exposes the tools of the official Figma MCP server under the sam
 | `use_figma` | Runs Figma Plugin API JavaScript (`figma.createFrame()`, `node.fills = …`, auto layout, text ranges, components, booleans, styles) against the file; a failing script saves nothing. Supported subset: `get_figma_skill` → `skill://figma/figma-use/SKILL.md` |
 | `search_design_system`, `get_libraries` | Components and styles across all files (every file is a library); `import_component` copies one into the current file |
 | `add_code_connect_map`, `get_code_connect_map`, `get_code_connect_suggestions`, `send_code_connect_mappings`, `get_context_for_code_connect` (+ `remove_code_connect_map`) | Code Connect: map design components to code components |
-| `upload_assets`, `download_assets` | Images into fills / new layers, SVG as editable vectors (from a path, URL, base64 or markup); export + source images + SVG icons out |
+| `create_upload_urls`, `upload_assets`, `download_assets` | Upload links send images and videos straight to storage (many at once, any size), then `upload_assets` places them as fills or new layers; it also takes a URL, path, base64 or SVG markup (SVG becomes editable vectors). Export + source images + SVG icons out |
 | `generate_diagram` | Mermaid flowchart / sequence / state / ER / gantt as editable layers |
 | `create_new_file`, `create_session`, `whoami`, `get_figjam`, `get_figma_skill` | File creation in a project, presence, workspace info, guidance |
 
@@ -143,6 +146,9 @@ Not available, because they depend on Figma's hosted services or products that d
 `node mcp/smoke-test.mjs` exercises every tool end to end against the dev deployment, including the access rules,
 the OAuth flow and the HTTP transport. It signs up two throwaway accounts (`smoke-alice@example.com`,
 `smoke-bob@example.com`) there.
+
+Every tool refuses parameters it does not know (with a "did you mean" hint) instead of ignoring them, and accepts the
+file id as either `fileId` or `fileKey`.
 
 ## Editor features
 
@@ -195,7 +201,8 @@ shared/    document model used by the editor, the backend and the MCP server:
 src/       React editor (canvas renderer, interactions, panels), file browser, prototype player
 mcp/       MCP server (talks to Convex over HTTP, renders PNGs with resvg): cli.ts runs it over stdio or HTTP,
            convex/mcpNode.ts runs it inside the deployment (/mcp route in convex/http.ts); parity.ts holds the
-           Figma-compatible tools, figmaApi.ts the Plugin API shim behind use_figma, diagram.ts the Mermaid layout
+           Figma-compatible tools, figmaApi.ts the Plugin API shim behind use_figma (run by sandbox.ts inside
+           QuickJS), renderPng.ts the preview renderer, diagram.ts the Mermaid layout
 ```
 
 - Every node is one row in the `nodes` table. All writes go through one mutation, `nodes.applyOps`

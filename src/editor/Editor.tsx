@@ -41,6 +41,7 @@ import { PrototypePanel } from './PrototypePanel'
 import { installShortcuts } from './shortcuts'
 import { bindRemote, clearHistory, patchState, resetEditor, S, select, setRaw, setTool, useEditor } from './store'
 import { useStyles, type StyleDoc } from './stylesStore'
+import { installVideoPosters } from './videoPoster'
 import { Toolbar } from './Toolbar'
 import { TextInput } from './ui'
 
@@ -171,6 +172,7 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
   }, [page?.background])
 
   useEffect(() => installShortcuts(), [])
+  useEffect(() => installVideoPosters(), [])
   useEffect(() => {
     bindUploader(async (blob) => {
       const url = await genUpload({})

@@ -6,7 +6,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { Resvg } from '@resvg/resvg-js'
 import { ConvexHttpClient } from 'convex/browser'
 import { anyApi } from 'convex/server'
 import { existsSync, readFileSync } from 'node:fs'
@@ -15,7 +14,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { currentToken, forgetToken, requestToken, startLogin } from './auth'
-import { fontOptions } from './fonts'
+import { inlineImages, missingNote, svgToPng } from './renderPng'
 import { registerParity } from './parity'
 import {
   ancestors,
@@ -112,6 +111,18 @@ async function loadPage(fileId: string, pageId?: string): Promise<PageCtx> {
   return { fileId, pageId: pid, nodes, ix: index }
 }
 
+/** Like pageOfNodes, but an id that is a page of the file stands for everything on that page. */
+async function pageOrNodes(fileId: string, ids: string[]): Promise<{ ctx: PageCtx; ids: string[]; wholePage: boolean }> {
+  const pages = (await convex.query(api.pages.list, { fileId })) as { _id: string }[]
+  const page = ids.find((id) => pages.some((p) => p._id === id))
+  if (page) {
+    if (ids.length > 1) throw new Error('Pass either one page id or node ids, not both')
+    const ctx = await loadPage(fileId, page)
+    return { ctx, ids: kids(ctx.ix, ROOT), wholePage: true }
+  }
+  return { ctx: await pageOfNodes(fileId, ids), ids, wholePage: false }
+}
+
 /** Find which page the given nodes live on. */
 async function pageOfNodes(fileId: string, ids: string[]): Promise<PageCtx> {
   if (!ids.length) throw new Error('No node ids given')
@@ -173,6 +184,10 @@ function normalizePaints(v: unknown, what: string): Paint[] | undefined {
       if (typeof p.url !== 'string') throw new Error('IMAGE paints need a url')
       return p
     }
+    if (p?.type === 'VIDEO') {
+      if (typeof p.url !== 'string') throw new Error('VIDEO paints need a url (an MP4 or WebM; upload one with create_upload_urls + upload_assets)')
+      return p
+    }
     throw new Error(`Unknown paint type in ${what}: ${JSON.stringify(p)}`)
   })
 }
@@ -210,13 +225,23 @@ function buildNodes(specs: unknown[], parentId: string | undefined, startOrder: 
   const ids: string[] = []
   specs.forEach((raw, i) => {
     const spec = raw as Record<string, unknown>
-    const type = String(spec?.type ?? '').toUpperCase() as NodeType
-    if (!NODE_TYPES.includes(type)) throw new Error(`Invalid node type "${spec?.type}". Use one of: ${NODE_TYPES.join(', ')}`)
+    const asked = String(spec?.type ?? '').toUpperCase()
+    // A section is stored as a frame with isSection; it never clips and has no auto layout.
+    const section = asked === 'SECTION'
+    const type = (section ? 'FRAME' : asked) as NodeType
+    if (!NODE_TYPES.includes(type)) throw new Error(`Invalid node type "${spec?.type}". Use one of: ${NODE_TYPES.join(', ')}, SECTION`)
     const props = normalizeProps(spec)
+    if (section) {
+      props.isSection = true
+      props.clipsContent = false
+      props.layoutMode = 'NONE'
+      props.fills ??= [{ type: 'SOLID', color: '#F5F5F5' }]
+      props.cornerRadius ??= 2
+    }
     const node = {
       id: newId(),
       order: startOrder + i,
-      name: type === 'TEXT' && typeof props.characters === 'string' && props.characters ? props.characters.split('\n')[0].slice(0, 40) : typeLabel(type),
+      name: type === 'TEXT' && typeof props.characters === 'string' && props.characters ? props.characters.split('\n')[0].slice(0, 40) : section ? 'Section' : typeLabel(type),
       x: 0,
       y: 0,
       width: 100,
@@ -267,6 +292,7 @@ function outline(ix: DocIndex, id: string, depth: number): Record<string, unknow
   if (n.layoutMode && n.layoutMode !== 'NONE') o.layoutMode = n.layoutMode
   if (n.isComponent) o.isComponent = true
   if (n.isComponentSet) o.isComponentSet = true
+  if (n.isSection) o.isSection = true
   if (n.componentId) o.componentId = n.componentId
   if (n.sourceId) o.sourceId = n.sourceId
   if (n.overrides?.length) o.overrides = n.overrides
@@ -291,17 +317,37 @@ function full(ix: DocIndex, id: string): Record<string, unknown> {
 
 const ok = (data: unknown) => ({ content: [{ type: 'text' as const, text: typeof data === 'string' ? data : JSON.stringify(data, null, 1) }] })
 
-const registrations: { name: string; description: string; shape: z.ZodRawShape; run: (args: never) => Promise<unknown> }[] = []
+const registrations: { name: string; description: string; schema: z.ZodType; run: (args: never) => Promise<unknown> }[] = []
 
 /** Declare a tool. Tools are registered on every server instance (one for stdio, one per request over HTTP). */
 function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, handler: (args: z.infer<z.ZodObject<S>>) => Promise<{ content: unknown[] }>) {
+  // The file is called fileId by some tools and fileKey by the Figma-compatible ones: every tool accepts either.
+  const primary = 'fileId' in shape ? 'fileId' : 'fileKey' in shape ? 'fileKey' : null
+  const alias = primary === 'fileId' ? 'fileKey' : 'fileId'
+  const required = primary ? !(shape[primary] as z.ZodType).safeParse(undefined).success : false
+  const full: z.ZodRawShape = primary ? { ...shape, [primary]: (shape[primary] as z.ZodType).optional().describe((shape[primary] as z.ZodType).description ?? 'File id'), [alias]: z.string().optional().describe(`Same as ${primary}; either name works`) } : shape
+  const known = Object.keys(full)
   registrations.push({
     name,
     description,
-    shape,
-    run: async (args: z.infer<z.ZodObject<S>>) => {
+    // Loose on the wire so that unknown parameters reach the check below and get a useful message.
+    schema: z.looseObject(full),
+    run: async (raw: Record<string, unknown>) => {
       try {
-        return await handler(args)
+        const unknown = Object.keys(raw ?? {}).filter((k) => !known.includes(k))
+        if (unknown.length) {
+          const near = (k: string) => known.find((x) => x.toLowerCase() === k.toLowerCase() || x.toLowerCase().includes(k.toLowerCase()) || k.toLowerCase().includes(x.toLowerCase()))
+          const hints = unknown.map((k) => (near(k) ? `"${k}" (did you mean "${near(k)}"?)` : `"${k}"`))
+          throw new Error(`Unknown parameter${unknown.length > 1 ? 's' : ''} ${hints.join(', ')} for ${name}. Nothing was done. Parameters: ${known.filter((k) => k !== alias || !primary).join(', ')}`)
+        }
+        const args = { ...raw } as Record<string, unknown>
+        if (primary) {
+          if (args[primary] !== undefined && args[alias] !== undefined && args[primary] !== args[alias]) throw new Error(`${primary} and ${alias} are the same parameter; pass one`)
+          args[primary] ??= args[alias]
+          delete args[alias]
+          if (required && args[primary] === undefined) throw new Error(`${primary} is required (the file id from list_files or create_file)`)
+        }
+        return await handler(args as never)
       } catch (e) {
         const data = (e as { data?: unknown }).data
         const msg = typeof data === 'string' ? data : e instanceof Error ? e.message : String(e)
@@ -319,9 +365,10 @@ function tool<S extends z.ZodRawShape>(name: string, description: string, shape:
 
 // ---------- server ----------
 const NODE_GUIDE = `Node model (all coordinates are px, relative to the parent's top-left; rotation in degrees clockwise):
-- type: FRAME | GROUP | RECTANGLE | ELLIPSE | LINE | POLYGON | STAR | VECTOR | TEXT. Only FRAME and GROUP take children.
+- type: FRAME | GROUP | RECTANGLE | ELLIPSE | LINE | POLYGON | STAR | VECTOR | TEXT | SECTION. Only FRAME, GROUP and SECTION take children.
+  SECTION organises a page: a labelled area that holds frames (stored as a FRAME with isSection:true; it never clips and has no auto layout).
 - Common: name, x, y, width, height, rotation, opacity (0..1), visible, locked, blendMode.
-- fills / strokes: arrays of paints. Paint = {type:"SOLID", color:"#RRGGBB", opacity?} | {type:"GRADIENT_LINEAR"|"GRADIENT_RADIAL", stops:[{position:0..1,color,opacity?}], angle?} (angle 0 = left→right, 90 = top→bottom) | {type:"IMAGE", url, scaleMode?:"FILL"|"FIT"|"STRETCH"}.
+- fills / strokes: arrays of paints. Paint = {type:"SOLID", color:"#RRGGBB", opacity?} | {type:"GRADIENT_LINEAR"|"GRADIENT_RADIAL", stops:[{position:0..1,color,opacity?}], angle?} (angle 0 = left→right, 90 = top→bottom) | {type:"IMAGE", url, scaleMode?:"FILL"|"FIT"|"STRETCH"} | {type:"VIDEO", url, posterUrl?, scaleMode?} (plays muted and looped in the editor; previews and exports show posterUrl, the first frame).
   Shorthands: fill:"#RRGGBB" and stroke:"#RRGGBB". fills:[] removes the fill.
 - strokeWeight, strokeAlign ("INSIDE"|"CENTER"|"OUTSIDE"), dashPattern [dash, gap], strokeCap.
 - cornerRadius (or cornerRadii [tl,tr,br,bl]) for RECTANGLE and FRAME.
@@ -350,15 +397,14 @@ const NODE_GUIDE = `Node model (all coordinates are px, relative to the parent's
 
 /**
  * Tools that only make sense when the server runs on the user's own machine. They are left out when it serves many
- * users over HTTP: login / logout manage a token file on disk, and use_figma runs caller-supplied JavaScript in
- * node:vm, which is not a security boundary.
+ * users over HTTP: login / logout manage a token file on disk.
  */
-const LOCAL_ONLY = new Set(['login', 'logout', 'use_figma'])
+const LOCAL_ONLY = new Set(['login', 'logout'])
 
 /** A server instance. `shared` = serving several users over HTTP, each request carrying its own token. */
 export const makeServer = (shared = false) => {
   const server = new McpServer({ name: 'figma-clone', version: '0.5.0' }, { instructions: shared ? INSTRUCTIONS_SHARED : INSTRUCTIONS })
-  for (const r of registrations) if (!shared || !LOCAL_ONLY.has(r.name)) server.registerTool(r.name, { description: r.description, inputSchema: r.shape }, r.run as never)
+  for (const r of registrations) if (!shared || !LOCAL_ONLY.has(r.name)) server.registerTool(r.name, { description: r.description, inputSchema: r.schema as never }, r.run as never)
   return server
 }
 export { requestToken }
@@ -374,9 +420,9 @@ Never guess ids: take them from list_files, list_pages, get_tree, find_nodes or 
 Access: you act as one user and see only the files they own or were invited to. If a tool reports "Not signed in", call login (opens a browser sign-in for the user) and retry.
 
 ${NODE_GUIDE}`
-const INSTRUCTIONS_SHARED = INSTRUCTIONS.replace(/, and use_figma, which runs[^\n]*/, '.').replace(
+const INSTRUCTIONS_SHARED = INSTRUCTIONS.replace(
   /Access: [^\n]*/,
-  'Access: you act as the signed-in user and see only the files they own or were invited to. use_figma and local file paths are not available on this hosted endpoint; use create_nodes / update_nodes, and pass assets as url, base64 or svg.',
+  'Access: you act as the signed-in user and see only the files they own or were invited to. Local file paths are not available on this hosted endpoint; send images with create_upload_urls, or as url / svg.',
 )
 
 tool(
@@ -1164,54 +1210,38 @@ tool(
 
 tool(
   'export_image',
-  'Render nodes (or a whole page) to an image so you can look at the design. Returns a PNG (default) or SVG source. Text is drawn with system fonts, so glyph widths can differ slightly from the browser.',
+  'Render nodes (or a whole page) to an image so you can look at the design. Returns a PNG (default) or SVG source. Every image is downloaded before drawing; the text of the result says how many were drawn and names any that could not be. Text is drawn with Inter or system fonts, so glyph widths can differ slightly from the browser.',
   {
     fileId,
     pageId: pageIdOpt,
-    nodeIds: z.array(z.string()).optional().describe('Nodes to render; omit to render the whole page'),
+    nodeIds: z.array(z.string()).optional().describe('Nodes to render, or a single page id for that whole page; omit to render the page given by pageId'),
     scale: z.number().min(0.1).max(4).optional().describe('Scale factor (default 1; automatically reduced for very large exports)'),
     format: z.enum(['png', 'svg']).optional(),
   },
   async ({ fileId, pageId, nodeIds, scale, format }) => {
-    const ctx = nodeIds?.length ? await pageOfNodes(fileId, nodeIds) : await loadPage(fileId, pageId)
-    const ids = nodeIds?.length ? sortByDocOrder(ctx.ix, topLevelOnly(ctx.ix, nodeIds)) : kids(ctx.ix, ROOT)
+    // A page id among nodeIds means "the whole of that page".
+    const target = nodeIds?.length ? await pageOrNodes(fileId, nodeIds) : { ctx: await loadPage(fileId, pageId), ids: [], wholePage: true }
+    const { ctx, wholePage } = target
+    const ids = wholePage ? kids(ctx.ix, ROOT) : sortByDocOrder(ctx.ix, topLevelOnly(ctx.ix, target.ids))
     if (!ids.length) return ok('The page is empty — nothing to render.')
     let background: string | undefined
-    if (!nodeIds?.length) {
+    if (wholePage) {
       const pages = (await convex.query(api.pages.list, { fileId })) as { _id: string; background?: string }[]
       background = pages.find((p) => p._id === ctx.pageId)?.background ?? '#F5F5F5'
     }
-    // Inline remote images so the renderer can draw them.
-    const images = new Map<string, string>()
-    if (format !== 'svg') {
-      const urls = new Set<string>()
-      for (const id of ids)
-        for (const nid of [id, ...descendants(ctx.ix, id)])
-          for (const p of ctx.ix.byId.get(nid)!.fills ?? []) if (p.type === 'IMAGE' && /^https?:/.test(p.url)) urls.add(p.url)
-      await Promise.all(
-        [...urls].slice(0, 30).map(async (u) => {
-          try {
-            const res = await fetch(u)
-            if (!res.ok) return
-            const buf = Buffer.from(await res.arrayBuffer())
-            if (buf.length < 8_000_000) images.set(u, `data:${res.headers.get('content-type') ?? 'image/png'};base64,${buf.toString('base64')}`)
-          } catch {
-            /* leave the image out */
-          }
-        }),
-      )
-    }
+    // Download every image first, so the picture is complete (or says what is absent).
+    const { images, missing, total } = format === 'svg' ? { images: new Map<string, string>(), missing: [], total: 0 } : await inlineImages(ctx.ix, ids)
     const probe = exportSvg(ctx.ix, ids, { measure: estimateMeasure })
     let s = scale ?? 1
     const maxSide = Math.max(probe.width, probe.height) * s
     if (maxSide > 2400) s *= 2400 / maxSide
     const { svg, width, height } = exportSvg(ctx.ix, ids, { measure: estimateMeasure, background, scale: s, images })
     if (format === 'svg') return ok(svg)
-    const png = new Resvg(svg, { font: fontOptions() }).render().asPng()
+    const note = missingNote(missing, total)
     return {
       content: [
-        { type: 'image' as const, data: Buffer.from(png).toString('base64'), mimeType: 'image/png' },
-        { type: 'text' as const, text: `Rendered ${ids.length} node(s) at ${r2(s)}x → ${Math.round(width)}×${Math.round(height)}px` },
+        { type: 'image' as const, data: svgToPng(svg).toString('base64'), mimeType: 'image/png' },
+        { type: 'text' as const, text: `Rendered ${wholePage ? 'the whole page' : `${ids.length} node(s)`} at ${r2(s)}x → ${Math.round(width)}×${Math.round(height)}px${total ? `, ${total - missing.length} of ${total} image(s) drawn` : ''}${note ? '\n' + note : ''}` },
       ],
     }
   },
@@ -1254,6 +1284,7 @@ registerParity({
   authSource: () => currentToken(CONVEX_URL)?.source ?? null,
   loadPage,
   pageOfNodes,
+  pageOrNodes,
   write,
   ok,
   fileUrl,

@@ -62,16 +62,119 @@ function getImage(url: string): HTMLImageElement | null {
   return null
 }
 
+// ---------- videos ----------
+// One muted, looping <video> per URL, kept off-DOM and painted onto the canvas like an image. Canvases that show
+// videos call `videosPlayingSince` after each paint and schedule another frame while it returns true.
+interface VideoEntry {
+  el: HTMLVideoElement
+  /** A first frame has been decoded. */
+  ready: boolean
+  error: boolean
+  /** performance.now() of the last live paint that used this video. */
+  lastDrawn: number
+}
+const videos = new Map<string, VideoEntry>()
+const videoReadyListeners = new Set<(url: string, el: HTMLVideoElement) => void>()
+const repaint = () => imageListeners.forEach((fn) => fn())
+
+/** Called once per video URL when its first frame is available (poster capture). */
+export function onVideoReady(fn: (url: string, el: HTMLVideoElement) => void): () => void {
+  videoReadyListeners.add(fn)
+  return () => void videoReadyListeners.delete(fn)
+}
+/** The loaded video element for a URL, if this session is showing it. */
+export function readyVideo(url: string): HTMLVideoElement | null {
+  const e = videos.get(url)
+  return e?.ready && !e.error ? e.el : null
+}
+
+function getVideo(url: string, live: boolean): VideoEntry | null {
+  let e = videos.get(url)
+  if (!e) {
+    if (!live || !url) return null
+    const el = document.createElement('video')
+    el.crossOrigin = 'anonymous'
+    el.muted = true
+    el.defaultMuted = true
+    el.loop = true
+    el.playsInline = true
+    el.autoplay = true
+    el.preload = 'auto'
+    el.setAttribute('muted', '')
+    el.setAttribute('playsinline', '')
+    const entry: VideoEntry = { el, ready: false, error: false, lastDrawn: 0 }
+    el.addEventListener('loadeddata', () => {
+      entry.ready = true
+      videoReadyListeners.forEach((fn) => fn(url, el))
+      repaint()
+    })
+    // `playing` (re)starts the repaint loop of whichever canvas is showing the video.
+    el.addEventListener('playing', repaint)
+    el.addEventListener('canplay', repaint)
+    el.addEventListener('seeked', repaint)
+    el.addEventListener('error', () => {
+      entry.error = true
+      repaint()
+    })
+    el.src = url
+    videos.set(url, (e = entry))
+  }
+  if (live) {
+    e.lastDrawn = performance.now()
+    if (!e.error && e.el.paused) void e.el.play().catch(() => {})
+  }
+  return e
+}
+
+/**
+ * True while a video painted at or after `t0` (a performance.now() taken just before painting) is playing, i.e. the
+ * canvas must paint again next frame. Videos that were not painted are paused, and dropped after a minute unused.
+ */
+export function videosPlayingSince(t0: number): boolean {
+  let playing = false
+  for (const [url, e] of videos) {
+    if (e.lastDrawn >= t0) {
+      if (!e.error && !e.el.paused && !e.el.ended && e.el.readyState >= 2) playing = true
+      continue
+    }
+    if (!e.el.paused) e.el.pause()
+    if (t0 - e.lastDrawn > 60_000) {
+      e.el.removeAttribute('src')
+      e.el.load()
+      videos.delete(url)
+    }
+  }
+  return playing
+}
+
+/** JPEG still of the video's current frame; null when it cannot be read (tainted canvas, no frame yet). */
+export async function captureVideoFrame(el: HTMLVideoElement, maxSize = 1280): Promise<Blob | null> {
+  try {
+    if (!el.videoWidth || !el.videoHeight || el.readyState < 2) return null
+    const s = Math.min(1, maxSize / Math.max(el.videoWidth, el.videoHeight))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(el.videoWidth * s))
+    canvas.height = Math.max(1, Math.round(el.videoHeight * s))
+    canvas.getContext('2d')!.drawImage(el, 0, 0, canvas.width, canvas.height)
+    return await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/jpeg', 0.82))
+  } catch {
+    return null
+  }
+}
+
 // ---------- scene ----------
 export interface DrawOptions {
   /** Draw layout grids (editor canvas only). */
   grids?: boolean
+  /** One-off render (export, thumbnail): use video frames that are already loaded but do not start or keep videos playing. */
+  still?: boolean
 }
 interface DrawCtx {
   ctx: CanvasRenderingContext2D
   ix: DocIndex
   scale: number // device px per world unit
   grids: boolean
+  live: boolean
 }
 
 function paintStyle(ctx: CanvasRenderingContext2D, p: Paint, n: SceneNode): string | CanvasGradient | null {
@@ -89,6 +192,19 @@ function paintStyle(ctx: CanvasRenderingContext2D, p: Paint, n: SceneNode): stri
   return null
 }
 
+/** Paint an image or video frame (`sw` × `sh` source pixels) into the node box using the paint's scale mode. Expects the clip to be set. */
+function drawScaled(ctx: CanvasRenderingContext2D, src: CanvasImageSource, sw: number, sh: number, mode: 'FILL' | 'FIT' | 'STRETCH' | undefined, n: SceneNode) {
+  let dw = n.width
+  let dh = n.height
+  if (mode !== 'STRETCH' && sw > 0 && sh > 0) {
+    const s = mode === 'FIT' ? Math.min(n.width / sw, n.height / sh) : Math.max(n.width / sw, n.height / sh)
+    dw = sw * s
+    dh = sh * s
+  }
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(src, (n.width - dw) / 2, (n.height - dh) / 2, dw, dh)
+}
+
 function drawImageFill(d: DrawCtx, p: Extract<Paint, { type: 'IMAGE' }>, n: SceneNode, path: Path2D) {
   const { ctx } = d
   const img = getImage(p.url)
@@ -99,19 +215,28 @@ function drawImageFill(d: DrawCtx, p: Extract<Paint, { type: 'IMAGE' }>, n: Scen
     ctx.fillRect(0, 0, n.width, n.height)
   } else {
     ctx.globalAlpha *= p.opacity ?? 1
-    let dw = n.width
-    let dh = n.height
-    if (p.scaleMode !== 'STRETCH') {
-      const s =
-        p.scaleMode === 'FIT'
-          ? Math.min(n.width / img.width, n.height / img.height)
-          : Math.max(n.width / img.width, n.height / img.height)
-      dw = img.width * s
-      dh = img.height * s
-    }
-    ctx.imageSmoothingQuality = 'high'
-    ctx.drawImage(img, (n.width - dw) / 2, (n.height - dh) / 2, dw, dh)
+    drawScaled(ctx, img, img.width, img.height, p.scaleMode, n)
   }
+  ctx.restore()
+}
+
+function drawVideoFill(d: DrawCtx, p: Extract<Paint, { type: 'VIDEO' }>, n: SceneNode, path: Path2D) {
+  const { ctx } = d
+  const v = getVideo(p.url, d.live)
+  const el = v && v.ready && !v.error && v.el.videoWidth > 0 ? v.el : null
+  ctx.save()
+  ctx.clip(path)
+  ctx.globalAlpha *= p.opacity ?? 1
+  // Until there is a frame (and for the instant a loop restarts): the poster, else a neutral placeholder.
+  if (!el || el.readyState < 2) {
+    const poster = p.posterUrl ? getImage(p.posterUrl) : null
+    if (poster) drawScaled(ctx, poster, poster.width, poster.height, p.scaleMode, n)
+    else {
+      ctx.fillStyle = '#E5E5E5'
+      ctx.fillRect(0, 0, n.width, n.height)
+    }
+  }
+  if (el) drawScaled(ctx, el, el.videoWidth, el.videoHeight, p.scaleMode, n)
   ctx.restore()
 }
 
@@ -258,6 +383,7 @@ function drawNode(d: DrawCtx, id: string) {
   } else {
     for (const p of fills) {
       if (p.type === 'IMAGE') drawImageFill(d, p, n, paths!.fill)
+      else if (p.type === 'VIDEO') drawVideoFill(d, p, n, paths!.fill)
       else {
         const style = paintStyle(ctx, p, n)
         if (style) {
@@ -335,7 +461,7 @@ function drawNode(d: DrawCtx, id: string) {
 
 /** Draw document nodes. The caller sets the base transform (world → device). */
 export function drawNodes(ctx: CanvasRenderingContext2D, ix: DocIndex, ids: string[], scale: number, opts: DrawOptions = {}) {
-  const d: DrawCtx = { ctx, ix, scale, grids: !!opts.grids }
+  const d: DrawCtx = { ctx, ix, scale, grids: !!opts.grids, live: !opts.still }
   for (const id of ids) drawNode(d, id)
 }
 
@@ -379,11 +505,26 @@ export interface FrameLabel {
   purple: boolean
 }
 
-/** Name labels shown above top-level frames (screen space). */
+/** Name labels shown above top-level frames, and above sections at any depth (screen space). */
 export function frameLabels(st: Pick<EditorState, 'doc' | 'world' | 'viewport'>, ctx: CanvasRenderingContext2D): FrameLabel[] {
   const out: FrameLabel[] = []
   ctx.font = '11px Inter, sans-serif'
-  for (const id of kids(st.doc, ROOT)) {
+  const ids = [...kids(st.doc, ROOT)]
+  // Nested sections, parents before children so the innermost label wins a click.
+  const nested = (parent: string) => {
+    for (const id of kids(st.doc, parent)) {
+      const n = st.doc.byId.get(id)!
+      if (n.visible === false || (n.type !== 'FRAME' && n.type !== 'GROUP')) continue
+      if (n.isSection && parent !== ROOT) ids.push(id)
+      if (!n.componentId && !n.booleanOp) nested(id)
+    }
+  }
+  for (const n of st.doc.byId.values())
+    if (n.isSection && n.parentId) {
+      nested(ROOT)
+      break
+    }
+  for (const id of ids) {
     const n = st.doc.byId.get(id)!
     if (n.type !== 'FRAME' || n.visible === false) continue
     const m = st.world.get(id)!
@@ -507,7 +648,7 @@ function drawPrototype(ctx: CanvasRenderingContext2D, st: EditorState) {
     return { x: b.x * vp.zoom + vp.x, y: b.y * vp.zoom + vp.y, w: b.w * vp.zoom, h: b.h * vp.zoom }
   }
   for (const n of st.doc.byId.values()) {
-    if (n.flowStart && !n.parentId) {
+    if (n.flowStart) {
       const b = sbox(n.id)
       ctx.font = '11px Inter, sans-serif'
       const label = `${n.flowStart} ▶`
@@ -937,7 +1078,7 @@ export function renderToCanvas(ix: DocIndex, ids: string[], bounds: Box, scale: 
       const m = worldMatrix(ix, p)
       ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5])
     }
-    drawNodes(ctx, ix, [id], scale)
+    drawNodes(ctx, ix, [id], scale, { still: true })
   }
   return canvas
 }

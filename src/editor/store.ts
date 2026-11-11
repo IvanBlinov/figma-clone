@@ -10,6 +10,7 @@ export type Tool =
   | 'move'
   | 'hand'
   | 'frame'
+  | 'section'
   | 'rectangle'
   | 'ellipse'
   | 'line'

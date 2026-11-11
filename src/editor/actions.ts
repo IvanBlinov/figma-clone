@@ -15,11 +15,11 @@ import { outlineSubs } from '../../shared/boolean'
 import { cssText } from '../../shared/css'
 import { exportSvg } from '../../shared/svg'
 import { cleanRuns, styleRange } from '../../shared/text'
-import { defaultsFor, isAutoLayout, newId, type BooleanOp, type NodeType, type Op, type Reaction, type SceneNode, type TextRunStyle } from '../../shared/types'
+import { defaultsFor, isAutoLayout, newId, sectionDefaults, type BooleanOp, type NodeType, type Op, type Reaction, type SceneNode, type TextRunStyle } from '../../shared/types'
 import { serializePath, subsBounds, transformSubs, type SubPath } from '../../shared/vector'
 import { measureText } from './fonts'
 import { frameAt, parentWorld, worldBoxOf } from './hit'
-import { renderToCanvas } from './render'
+import { captureVideoFrame, renderToCanvas } from './render'
 import { commit, patchState, S, screenToWorld, setDraft } from './store'
 
 const IDM: Mat = [1, 0, 0, 1, 0, 0]
@@ -217,6 +217,7 @@ export function addAutoLayout() {
   const st = S()
   let target = st.selection.length === 1 ? node(st.selection[0]) : undefined
   let wrapped = false
+  if (target?.isSection) return // sections have no auto layout
   if (!target || target.type !== 'FRAME' || isAutoLayout(target)) {
     if (!st.selection.length) return
     const id = wrapSelection('FRAME')
@@ -477,10 +478,14 @@ export function insertNode(n: SceneNode, selectIt = true) {
   commit([{ op: 'create', node: n }], selectIt ? { select: [n.id] } : {})
 }
 
-/** Parent frame + local coordinates for something created at a world point. */
-export function placement(p: Pt): { parentId?: string; local: Pt; world: Mat } {
+/**
+ * Parent frame + local coordinates for something created at a world point. With `sectionsOnly` the parent is the
+ * nearest section under the point (sections live on the page or inside other sections, never inside frames).
+ */
+export function placement(p: Pt, sectionsOnly = false): { parentId?: string; local: Pt; world: Mat } {
   const st = S()
-  const parent = frameAt(st, p, new Set())
+  let parent = frameAt(st, p, new Set())
+  if (sectionsOnly) while (parent !== ROOT && !st.doc.byId.get(parent)?.isSection) parent = parentOf(st.doc, parent)
   const pm = worldOf(parent)
   const inv = invert(pm)
   return {
@@ -519,6 +524,88 @@ export async function placeImage(file: Blob, at?: Pt, name = 'Image') {
       fills: [{ type: 'IMAGE', url, scaleMode: 'FILL' }],
     }),
   )
+}
+
+export const isVideoFile = (f: Blob & { name?: string }) => f.type === 'video/mp4' || f.type === 'video/webm' || (!f.type && /\.(mp4|webm)$/i.test(f.name ?? ''))
+
+/** Size and first frame of a local video file (the poster is null when the browser cannot decode it in time). */
+async function probeVideo(file: Blob): Promise<{ width: number; height: number; poster: Blob | null }> {
+  const src = URL.createObjectURL(file)
+  const el = document.createElement('video')
+  el.muted = true
+  el.playsInline = true
+  el.preload = 'auto'
+  try {
+    await new Promise<void>((res) => {
+      el.addEventListener('loadeddata', () => res(), { once: true })
+      el.addEventListener('error', () => res(), { once: true })
+      setTimeout(res, 8000)
+      el.src = src
+      el.load()
+    })
+    return { width: el.videoWidth || 640, height: el.videoHeight || 360, poster: await captureVideoFrame(el) }
+  } finally {
+    el.removeAttribute('src')
+    el.load()
+    URL.revokeObjectURL(src)
+  }
+}
+
+/** Upload a video file, plus a poster of its first frame when one can be read. */
+export async function uploadVideo(file: Blob): Promise<{ url: string; posterUrl?: string; width: number; height: number }> {
+  const meta = await probeVideo(file)
+  const url = await uploader(file)
+  let posterUrl: string | undefined
+  if (meta.poster) posterUrl = await uploader(meta.poster).catch(() => undefined)
+  return { url, ...(posterUrl ? { posterUrl } : {}), width: meta.width, height: meta.height }
+}
+
+export async function placeVideo(file: Blob, at?: Pt, name = 'Video') {
+  const v = await uploadVideo(file)
+  const st = S()
+  const center = at ?? screenToWorld(st.canvasSize.w / 2, st.canvasSize.h / 2)
+  const s = Math.min(1, 800 / Math.max(v.width, v.height))
+  const w = Math.round(v.width * s)
+  const h = Math.round(v.height * s)
+  const pl = placement(center)
+  insertNode(
+    makeNode('RECTANGLE', {
+      name,
+      parentId: pl.parentId,
+      x: Math.round(pl.local.x - w / 2),
+      y: Math.round(pl.local.y - h / 2),
+      width: w,
+      height: h,
+      fills: [{ type: 'VIDEO', url: v.url, ...(v.posterUrl ? { posterUrl: v.posterUrl } : {}), scaleMode: 'FILL' }],
+    }),
+  )
+}
+
+/** Place a dropped / pasted / picked media file: an image or a video. Returns false for anything else. */
+export function placeMedia(file: File, at?: Pt): boolean {
+  const name = file.name ? file.name.replace(/\.\w+$/, '') : undefined
+  if (isVideoFile(file)) void placeVideo(file, at, name || 'Video').catch(() => {})
+  else if (file.type.startsWith('image/')) void placeImage(file, at, name || 'Image')
+  else return false
+  return true
+}
+
+// ---------- sections ----------
+/** A new section node (a FRAME with isSection) named "Section N". */
+export function makeSection(props: Partial<SceneNode>): SceneNode {
+  let max = 0
+  for (const n of S().doc.byId.values()) {
+    const m = n.isSection && n.name.match(/^Section (\d+)$/)
+    if (m) max = Math.max(max, +m[1])
+  }
+  return makeNode('FRAME', { name: `Section ${max + 1}`, ...sectionDefaults(), ...props })
+}
+
+/** Order that puts a new node behind its siblings (a section is drawn around existing content, not over it). */
+export function backOrder(parentId: string): number {
+  const { doc } = S()
+  const list = kids(doc, parentId)
+  return list.length ? doc.byId.get(list[0])!.order - 1 : 0
 }
 
 // ---------- viewport ----------
@@ -839,9 +926,12 @@ export function toggleTextStyle(kind: 'bold' | 'italic' | 'underline' | 'strike'
 }
 
 // ---------- prototype ----------
+/** The screen a node belongs to: its outermost ancestor (or itself), looking through sections. */
 export function topFrameOf(id: string): string {
-  const list = ancestors(S().doc, id)
-  return list.length ? list[list.length - 1] : id
+  const { doc } = S()
+  const chain = [id, ...ancestors(doc, id)]
+  for (let i = chain.length - 1; i >= 0; i--) if (!doc.byId.get(chain[i])?.isSection) return chain[i]
+  return id
 }
 
 export function addReaction(fromId: string, toId: string) {

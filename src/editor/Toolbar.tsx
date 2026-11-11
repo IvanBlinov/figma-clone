@@ -1,6 +1,6 @@
-import { ChevronDown, Circle, Frame, Hand, Image as ImageIcon, MessageCircle, Minus, MousePointer2, MoveUpRight, Pencil, PenTool, Redo2, Square, Star, Triangle, Type, Undo2 } from 'lucide-react'
+import { ChevronDown, Circle, Frame, Hand, Image as ImageIcon, MessageCircle, Minus, MousePointer2, MoveUpRight, PanelTop, Pencil, PenTool, Redo2, Square, Star, Triangle, Type, Undo2 } from 'lucide-react'
 import { useRef, useState, type ReactNode } from 'react'
-import { placeImage } from './actions'
+import { placeMedia } from './actions'
 import { redo, setTool, undo, useEditor, type Tool } from './store'
 
 interface Item {
@@ -93,12 +93,13 @@ export function Toolbar() {
     <div className="toolbar">
       <Group items={MOVE} />
       {single('frame', 'Frame', 'F', <Frame {...I} />)}
+      {single('section', 'Section', 'Shift+S', <PanelTop {...I} />)}
       <Group
         items={SHAPES}
         extra={
           <button onClick={() => file.current?.click()}>
             <ImageIcon {...I} />
-            <span className="grow">Image…</span>
+            <span className="grow">Image or video…</span>
             <kbd>Ctrl+Shift+K</kbd>
           </button>
         }
@@ -117,11 +118,11 @@ export function Toolbar() {
         id="image-file-input"
         ref={file}
         type="file"
-        accept="image/*"
+        accept="image/*,video/mp4,video/webm"
         multiple
         hidden
         onChange={(e) => {
-          for (const f of Array.from(e.target.files ?? [])) void placeImage(f, undefined, f.name.replace(/\.\w+$/, ''))
+          for (const f of Array.from(e.target.files ?? [])) placeMedia(f)
           e.target.value = ''
         }}
       />

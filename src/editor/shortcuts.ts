@@ -16,7 +16,9 @@ import {
   makeNode,
   nudge,
   pasteClip,
+  isVideoFile,
   placeImage,
+  placeVideo,
   placement,
   reorderSelection,
   selectAll,
@@ -199,6 +201,7 @@ export function installShortcuts(): () => void {
       if (e.code === 'KeyR') return patchState({ showRulers: !st.showRulers }), done()
       if (e.code === 'KeyP') return setTool('pencil'), done()
       if (e.code === 'KeyL') return setTool('arrow'), done()
+      if (e.code === 'KeyS') return setTool('section'), done()
       if (e.code === 'KeyE') return patchState({ mode: st.mode === 'prototype' ? 'design' : 'prototype' }), done()
     }
     if (!e.shiftKey && /^Digit\d$/.test(e.code) && st.selection.length) {
@@ -270,9 +273,9 @@ export function installShortcuts(): () => void {
   }
   const onPaste = (e: ClipboardEvent) => {
     if (typing(e.target)) return
-    const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith('image/'))
+    const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith('image/') || isVideoFile(f))
     if (files.length) {
-      for (const f of files) void placeImage(f)
+      for (const f of files) isVideoFile(f) ? void placeVideo(f).catch(() => {}) : void placeImage(f)
       return e.preventDefault()
     }
     const text = e.clipboardData?.getData('text/plain')

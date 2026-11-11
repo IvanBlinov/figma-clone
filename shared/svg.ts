@@ -3,7 +3,7 @@ import { boundsOf, corners, IDENTITY, localMatrix, unionBoxes, type Box, type Ma
 import { fillRuleOf, isBoolean, paintsSelf, shapeOf } from './boolean'
 import { arrowHeads, gradientLine, nodeShape, strokeInset, visiblePaints } from './paths'
 import { fontSizeOf, layoutText, textOrigin, wrapWidthOf, type MeasureFn } from './text'
-import type { Paint, SceneNode } from './types'
+import { VIDEO_FALLBACK, type Paint, type SceneNode } from './types'
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 const num = (v: number) => (Math.round(v * 1000) / 1000).toString()
@@ -164,9 +164,13 @@ export function exportSvg(ix: DocIndex, ids: string[], opts: SvgOptions): { svg:
       }
       if (n.type !== 'LINE' && paintsSelf(n))
         for (const p of visiblePaints(n.fills)) {
-          if (p.type === 'IMAGE') {
+          // A video exports as its poster frame, or as a flat dark fill when it has none.
+          const src = p.type === 'IMAGE' ? p.url : p.type === 'VIDEO' ? p.posterUrl : undefined
+          if (p.type === 'VIDEO' && !src) {
+            body += `<path d="${shape.d}"${scaleAttr}${rule} fill="${cssColor(VIDEO_FALLBACK, p.opacity ?? 1)}"/>`
+          } else if ((p.type === 'IMAGE' || p.type === 'VIDEO') && src !== undefined) {
             const par = p.scaleMode === 'FIT' ? 'xMidYMid meet' : p.scaleMode === 'STRETCH' ? 'none' : 'xMidYMid slice'
-            body += `<image href="${esc(opts.images?.get(p.url) ?? p.url)}" width="${num(n.width)}" height="${num(n.height)}" preserveAspectRatio="${par}" clip-path="url(#${needClip()})"${(p.opacity ?? 1) < 1 ? ` opacity="${num(p.opacity ?? 1)}"` : ''}/>`
+            body += `<image href="${esc(opts.images?.get(src) ?? src)}" width="${num(n.width)}" height="${num(n.height)}" preserveAspectRatio="${par}" clip-path="url(#${needClip()})"${(p.opacity ?? 1) < 1 ? ` opacity="${num(p.opacity ?? 1)}"` : ''}/>`
           } else {
             const fill = paintAttr(p, n)
             if (fill) body += `<path d="${shape.d}"${scaleAttr}${rule} fill="${fill}"/>`

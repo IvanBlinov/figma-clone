@@ -12,7 +12,9 @@ import {
   SquaresUnite,
   Eye,
   EyeOff,
+  Film,
   Frame,
+  PanelTop,
   GalleryHorizontal,
   GalleryVertical,
   Image as ImageIcon,
@@ -45,7 +47,9 @@ export function NodeIcon({ n }: { n: SceneNode }) {
   if (n.booleanOp === 'SUBTRACT') return <SquaresSubtract {...p} />
   if (n.booleanOp === 'INTERSECT') return <SquaresIntersect {...p} />
   if (n.booleanOp === 'EXCLUDE') return <SquaresExclude {...p} />
+  if (n.isSection && n.type === 'FRAME') return <PanelTop {...p} />
   if (isAutoLayout(n)) return n.layoutMode === 'HORIZONTAL' ? <GalleryHorizontal {...p} /> : <GalleryVertical {...p} />
+  if ((n.fills ?? []).some((f) => f.type === 'VIDEO') && n.type === 'RECTANGLE') return <Film {...p} />
   if ((n.fills ?? []).some((f) => f.type === 'IMAGE') && n.type === 'RECTANGLE') return <ImageIcon {...p} />
   switch (n.type) {
     case 'FRAME':

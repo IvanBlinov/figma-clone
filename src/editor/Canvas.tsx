@@ -18,9 +18,9 @@ import {
 } from '../../shared/geometry'
 import { isAutoLayout, type NodeType, type Op, type SceneNode } from '../../shared/types'
 import { serializePath, smoothPath, subsBounds, transformSubs, type SubPath } from '../../shared/vector'
-import { addReaction, componentsToInstances, createInstance, makeNode, placeImage, placement, sizeSideEffects, commitDraft, toggleTextStyle, topFrameOf, zoomAt } from './actions'
+import { addReaction, backOrder, componentsToInstances, createInstance, makeNode, makeSection, placeMedia, placement, sizeSideEffects, commitDraft, toggleTextStyle, topFrameOf, zoomAt } from './actions'
 import { frameAt, hitPath, parentWorld, pick, pickDeeper, snapBox, worldBoxOf } from './hit'
-import { drawNodes, drawOverlay, frameLabels, protoHandle, RULER, selectionBox, setImageLoadCallback, visibleRootIds, type RemoteUser, type SelectionBox } from './render'
+import { drawNodes, drawOverlay, frameLabels, protoHandle, RULER, selectionBox, setImageLoadCallback, videosPlayingSince, visibleRootIds, type RemoteUser, type SelectionBox } from './render'
 import { clearDraft, commit, patchState, S, screenToWorld, select, setDraft, setTool, useEditor, type Tool } from './store'
 import {
   applyTextInput,
@@ -43,6 +43,7 @@ export { finishTextEdit, startTextEdit } from './textEdit'
 
 const SHAPE_TOOLS: Partial<Record<Tool, NodeType>> = {
   frame: 'FRAME',
+  section: 'FRAME',
   rectangle: 'RECTANGLE',
   ellipse: 'ELLIPSE',
   line: 'LINE',
@@ -239,6 +240,7 @@ export function Canvas({ remotes, onCursor, onCommentAt, onContextMenu }: Props)
     let raf = 0
     const draw = () => {
       raf = 0
+      const t0 = performance.now()
       const st = S()
       const dpr = window.devicePixelRatio || 1
       const { w, h } = st.canvasSize
@@ -254,6 +256,8 @@ export function Canvas({ remotes, onCursor, onCommentAt, onContextMenu }: Props)
       drawNodes(ctx, st.doc, visibleRootIds(st), s, { grids: st.showGrids })
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       drawOverlay(ctx, st, remotesRef.current)
+      // Video fills: keep painting, one frame at a time, for as long as a video that was just drawn is playing.
+      if (videosPlayingSince(t0)) schedule.current()
     }
     schedule.current = () => {
       if (!raf) raf = requestAnimationFrame(draw)
@@ -289,6 +293,7 @@ export function Canvas({ remotes, onCursor, onCommentAt, onContextMenu }: Props)
       ro.disconnect()
       canvas.removeEventListener('wheel', onWheel)
       cancelAnimationFrame(raf)
+      videosPlayingSince(Infinity) // nothing paints them any more: pause and release every video
     }
   }, [])
 
@@ -417,9 +422,12 @@ export function Canvas({ remotes, onCursor, onCommentAt, onContextMenu }: Props)
 
     const shape = SHAPE_TOOLS[tool]
     if (shape) {
-      const pl = placement(p)
-      const node = makeNode(shape, { parentId: pl.parentId, x: pl.local.x, y: pl.local.y, width: 0, height: 0, ...(tool === 'arrow' ? { arrowEnd: true, name: 'Arrow' } : {}) })
-      node.order = nextOrder(st.doc, pl.parentId ?? ROOT)
+      const section = tool === 'section'
+      const pl = placement(p, section)
+      const geo = { parentId: pl.parentId, x: pl.local.x, y: pl.local.y, width: 0, height: 0 }
+      const node = section ? makeSection(geo) : makeNode(shape, { ...geo, ...(tool === 'arrow' ? { arrowEnd: true, name: 'Arrow' } : {}) })
+      // A section goes behind its siblings so that drawing one around existing layers does not cover them.
+      node.order = section ? backOrder(pl.parentId ?? ROOT) : nextOrder(st.doc, pl.parentId ?? ROOT)
       setDraft({}, [node])
       select([node.id])
       drag.current = { kind: 'create', type: shape, start: p, id: node.id, pm: pl.world, moved: false }
@@ -524,7 +532,8 @@ export function Canvas({ remotes, onCursor, onCommentAt, onContextMenu }: Props)
         return
       }
       case 'proto': {
-        const top = hitPath(st, p)[0]
+        // Sections are not screens: connect to the frame inside them.
+        const top = hitPath(st, p).find((id) => !st.doc.byId.get(id)!.isSection)
         const ok = !!top && st.doc.byId.get(top)!.type === 'FRAME' && top !== d.from && top !== topFrameOf(d.from)
         patchState({ protoDrag: { from: d.from, to: p, target: ok ? top : null } })
         return
@@ -927,7 +936,7 @@ export function Canvas({ remotes, onCursor, onCommentAt, onContextMenu }: Props)
     const p = screenToWorld(sx, sy)
     const comp = e.dataTransfer.getData('application/x-figclone-component')
     if (comp) return void createInstance(comp, p)
-    for (const f of Array.from(e.dataTransfer.files)) if (f.type.startsWith('image/')) void placeImage(f, p, f.name.replace(/\.\w+$/, ''))
+    for (const f of Array.from(e.dataTransfer.files)) placeMedia(f, p)
   }
 
   return (

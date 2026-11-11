@@ -52,7 +52,7 @@ const call = async (name, args = {}) => {
 const { tools } = await client.listTools()
 const names = tools.map((t) => t.name)
 expect(tools.length >= 65, `tools listed (${tools.length})`)
-expect(!names.includes('use_figma') && !names.includes('login') && !names.includes('logout'), 'machine-local tools are not offered')
+expect(names.includes('use_figma') && names.includes('create_upload_urls') && !names.includes('login') && !names.includes('logout'), 'use_figma and upload links are offered; login / logout are not')
 expect(/hosted endpoint/.test(client.getInstructions() ?? ''), 'instructions describe the hosted endpoint')
 
 const who = await call('whoami')
@@ -69,14 +69,64 @@ expect(!made.res.isError, `create_nodes (${made.text.slice(0, 80).replace(/\s+/g
 const tree = await call('get_tree', { fileId })
 expect(tree.text.includes('Card') && tree.text.includes('Hosted'), 'get_tree returns the new layers')
 const frameId = made.data.created?.[0]?.id ?? made.data.nodes?.[0]?.id ?? tree.text.match(/"id":\s*"([^"]+)"/)?.[1]
-const png = await client.callTool({ name: 'export_image', arguments: { fileId, nodeId: frameId } })
+const png = await client.callTool({ name: 'export_image', arguments: { fileId, nodeIds: [frameId] } })
 const image = png.content.find((x) => x.type === 'image')
 expect(!!image && Buffer.from(image.data, 'base64').subarray(1, 4).toString() === 'PNG', `export_image renders a PNG${image ? ` (${Buffer.from(image.data, 'base64').length} bytes)` : ': ' + JSON.stringify(png.content).slice(0, 200)}`)
 if (process.env.SAVE_PNG && image) (await import('node:fs')).writeFileSync(process.env.SAVE_PNG, Buffer.from(image.data, 'base64'))
+// Scripts run in the sandbox: they can edit the file but cannot reach the server around them.
+const script = await call('use_figma', {
+  fileKey: fileId,
+  description: 'add a section with three cards',
+  code: `const s = figma.createSection(); s.name = 'Flow'; s.resizeWithoutConstraints ? s.resizeWithoutConstraints(700, 200) : s.resize(700, 200); s.x = 400
+for (let i = 0; i < 3; i++) { const r = figma.createRectangle(); r.name = 'Card ' + i; r.resize(180, 120); r.x = 20 + i * 220; r.y = 40; s.appendChild(r) }
+return { type: s.type, cards: s.children.length, env: typeof process + '/' + typeof fetch + '/' + typeof require, ids: s.children.map((c) => c.id) }`,
+})
+expect(script.data?.result?.type === 'SECTION' && script.data.result.cards === 3 && script.data.changes?.created === 4, `use_figma creates layers (${script.text.slice(0, 90).replace(/\s+/g, ' ')})`)
+expect(script.data?.result?.env === 'undefined/undefined/undefined', 'the script has no access to the server process or the network')
+const failing = await call('use_figma', { fileKey: fileId, description: 'fails', code: 'figma.createFrame(); throw new Error("boom")' })
+expect(failing.res.isError && /boom/.test(failing.text), 'a failing script reports its error')
+const looping = await call('use_figma', { fileKey: fileId, description: 'never ends', code: 'while (true) {}' })
+expect(looping.res.isError && /timed out/.test(looping.text), 'a runaway script is stopped')
+const afterScripts = await call('get_tree', { fileId })
+expect((afterScripts.text.match(/"Card \d"/g) ?? []).length === 3 && !/"Frame"/.test(afterScripts.text), 'failed scripts saved nothing')
+
+// Upload links: the bytes go straight to storage, then one call places them.
+const cards = script.data?.result?.ids ?? []
+const links = await call('create_upload_urls', { fileId, count: 3 })
+expect(links.data?.uploadUrls?.length === 3, 'create_upload_urls hands out links')
+const pngBytes = Buffer.from(image.data, 'base64')
+const storageIds = await Promise.all((links.data?.uploadUrls ?? []).map(async (u) => (await (await fetch(u, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: pngBytes })).json()).storageId))
+const placed = await call('upload_assets', { fileKey: fileId, assets: [...storageIds.slice(0, 2).map((storageId, i) => ({ storageId, nodeId: cards[i] })), { storageId: storageIds[2], name: 'Loose image' }] })
+expect(!placed.res.isError && placed.data?.uploaded?.length === 3 && placed.data.uploaded[2].width === 240, `upload_assets places uploaded files (${placed.text.slice(0, 80).replace(/\s+/g, ' ')})`)
+const video = await call('create_nodes', { fileId, nodes: [{ type: 'RECTANGLE', name: 'Clip', x: 0, y: 300, width: 160, height: 90, fills: [{ type: 'VIDEO', url: process.env.VIDEO_URL ?? 'https://example.com/clip.mp4' }] }] })
+expect(!video.res.isError, 'video fills are accepted')
+
+// Previews: a page id renders the whole page, and the result says which images are in the picture.
+const pageId = created.data.pageId
+const whole = await client.callTool({ name: 'export_image', arguments: { fileId, nodeIds: [pageId] } })
+const wholeText = whole.content.find((x) => x.type === 'text')?.text ?? ''
+expect(!!whole.content.find((x) => x.type === 'image') && /whole page/.test(wholeText) && /3 of 4 image\(s\) drawn/.test(wholeText) && /"Clip"/.test(wholeText), `export_image accepts a page id and reports images (${wholeText.slice(0, 160).replace(/\s+/g, ' ')})`)
+if (process.env.SAVE_PNG) (await import('node:fs')).writeFileSync(process.env.SAVE_PNG.replace('.png', '-page.png'), Buffer.from(whole.content.find((x) => x.type === 'image').data, 'base64'))
+const shot = await client.callTool({ name: 'get_screenshot', arguments: { fileKey: fileId, nodeId: pageId } })
+const shotInfo = JSON.parse(shot.content.find((x) => x.type === 'text')?.text ?? '{}')
+expect(!shot.isError && shotInfo.images_drawn === 3 && shotInfo.images_total === 4 && /Clip/.test(shotInfo.warning ?? ''), 'get_screenshot accepts a page id and reports images')
+
+// Parameters: unknown names are refused, and the file can be named either way.
+const typo = await call('export_image', { fileId, ids: [frameId] })
+expect(typo.res.isError && /Unknown parameter "ids" \(did you mean "nodeIds"\?\)/.test(typo.text), `unknown parameters are refused (${typo.text.slice(0, 90)})`)
+const aliasA = await call('get_tree', { fileKey: fileId })
+const aliasB = await call('get_metadata', { fileId })
+expect(!aliasA.res.isError && !aliasB.res.isError, 'fileId and fileKey are interchangeable')
+const noFile = await call('get_tree', {})
+expect(noFile.res.isError && /fileId is required/.test(noFile.text), 'a missing file id is reported')
+const section = await call('create_nodes', { fileId, nodes: [{ type: 'SECTION', name: 'Onboarding', x: 0, y: 500, width: 500, height: 300, children: [{ type: 'FRAME', name: 'Step 1', x: 20, y: 20, width: 120, height: 200 }] }] })
+expect(!section.res.isError && /isSection/.test((await call('get_tree', { fileId })).text), 'create_nodes makes sections')
+
 const localPath = await call('upload_assets', { fileKey: fileId, assets: [{ path: 'C:/Windows/win.ini' }] })
 expect(localPath.res.isError && /hosted endpoint/.test(localPath.text), 'local file paths are refused')
 
-await c.mutation(anyApi.files.remove, { fileId })
+if (process.env.KEEP_FILE) console.log('kept file', fileId)
+else await c.mutation(anyApi.files.remove, { fileId })
 for (const t of await c.query(anyApi.tokens.list, {})) if (t.name === 'hosted test') await c.mutation(anyApi.tokens.revoke, { tokenId: t._id })
 const revoked = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: '{}' })
 expect(revoked.status === 401, 'revoked token stops working')

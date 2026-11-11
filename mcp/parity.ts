@@ -1,10 +1,9 @@
 // Tools that mirror the official Figma MCP server (same names and argument shapes where it makes sense),
 // so agents and prompts written for Figma work against this clone.
-import { Resvg } from '@resvg/resvg-js'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { extname } from 'node:path'
-import { fontOptions } from './fonts'
+import { inlineImages, missingNote, svgToPng } from './renderPng'
 import { z } from 'zod'
 import { isBoolean } from '../shared/boolean'
 import { cssOf } from '../shared/css'
@@ -16,7 +15,8 @@ import { svgToNodes } from '../shared/svgParse'
 import { cleanRuns, estimateMeasure } from '../shared/text'
 import { newId, nodeLabel, type Op, type SceneNode } from '../shared/types'
 import { buildDiagram } from './diagram'
-import { runFigmaCode, USE_FIGMA_GUIDE, type PageModel, type StyleModel } from './figmaApi'
+import { USE_FIGMA_GUIDE, type PageModel, type StyleModel } from './figmaApi'
+import { runFigmaCode } from './sandbox'
 
 interface PageCtx {
   fileId: string
@@ -32,6 +32,7 @@ export interface ParityDeps {
   authSource: () => string | null
   loadPage: (fileId: string, pageId?: string) => Promise<PageCtx>
   pageOfNodes: (fileId: string, ids: string[]) => Promise<PageCtx>
+  pageOrNodes: (fileId: string, ids: string[]) => Promise<{ ctx: PageCtx; ids: string[]; wholePage: boolean }>
   write: (ctx: PageCtx, ops: Op[], touched?: string[]) => Promise<DocIndex>
   ok: (data: unknown) => { content: { type: 'text'; text: string }[] }
   fileUrl: (fileId: string) => string
@@ -46,7 +47,7 @@ const r2 = (v: number) => Math.round(v * 100) / 100
 const escXml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 const LABELS = ['React', 'Web Components', 'Vue', 'Svelte', 'Storybook', 'Javascript', 'Swift', 'Swift UIKit', 'Objective-C UIKit', 'SwiftUI', 'Compose', 'Java', 'Kotlin', 'Android XML Layout', 'Flutter', 'Markdown'] as const
 
-const figType = (n: SceneNode) => (n.isComponentSet ? 'component-set' : n.isComponent ? 'component' : n.componentId ? 'instance' : n.booleanOp ? 'boolean-operation' : n.type.toLowerCase())
+const figType = (n: SceneNode) => (n.isSection ? 'section' : n.isComponentSet ? 'component-set' : n.isComponent ? 'component' : n.componentId ? 'instance' : n.booleanOp ? 'boolean-operation' : n.type.toLowerCase())
 
 function metadataXml(ix: DocIndex, id: string, depth = 0): string {
   const n = ix.byId.get(id)!
@@ -57,12 +58,13 @@ function metadataXml(ix: DocIndex, id: string, depth = 0): string {
   return `${pad}<${figType(n)} ${attrs}>\n${children.map((c) => metadataXml(ix, c, depth + 1)).join('\n')}\n${pad}</${figType(n)}>`
 }
 
-function render(ix: DocIndex, ids: string[], maxDimension = 1024, background?: string) {
+async function render(ix: DocIndex, ids: string[], maxDimension = 1024, background?: string) {
   const probe = exportSvg(ix, ids, { measure: estimateMeasure })
   const scale = Math.min(4, maxDimension / Math.max(probe.width, probe.height, 1))
-  const { svg, width, height } = exportSvg(ix, ids, { measure: estimateMeasure, scale, background })
-  const png = new Resvg(svg, { font: fontOptions() }).render().asPng()
-  return { png: Buffer.from(png).toString('base64'), width: Math.round(width), height: Math.round(height), original_width: Math.round(probe.width), original_height: Math.round(probe.height) }
+  const { images, missing, total } = await inlineImages(ix, ids)
+  const { svg, width, height } = exportSvg(ix, ids, { measure: estimateMeasure, scale, background, images })
+  const note = missingNote(missing, total)
+  return { png: svgToPng(svg).toString('base64'), width: Math.round(width), height: Math.round(height), original_width: Math.round(probe.width), original_height: Math.round(probe.height), ...(total ? { images_drawn: total - missing.length, images_total: total } : {}), ...(note ? { warning: note } : {}) }
 }
 
 function imageSize(buf: Buffer): { w: number; h: number } | null {
@@ -86,7 +88,7 @@ function imageSize(buf: Buffer): { w: number; h: number } | null {
   return null
 }
 
-const MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' }
+const MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime' }
 
 export function registerParity(d: ParityDeps) {
   const { tool, convex, api, ok } = d
@@ -175,12 +177,13 @@ export function registerParity(d: ParityDeps) {
 
   tool(
     'get_screenshot',
-    'Render a node to a PNG so you can look at it. maxDimension (default 1024) caps the longer edge. The image is returned inline together with its size and the node\'s natural size.',
+    'Render a node, or a whole page when nodeId is a page id, to a PNG so you can look at it. maxDimension (default 1024) caps the longer edge. The image is returned inline together with its size and natural size. Images are downloaded before drawing; if any could not be drawn the result carries a "warning" naming them.',
     { fileKey, nodeId, maxDimension: z.number().int().min(16).max(8192).optional(), contentsOnly: z.boolean().optional().describe('Accepted for compatibility; nodes are always rendered in isolation'), enableBase64Response: z.boolean().optional().describe('Accepted for compatibility; the image is always inline'), sessionId },
     async ({ fileKey, nodeId, maxDimension }) => {
-      const ctx = await d.pageOfNodes(fileKey, [nodeId])
-      const r = render(ctx.ix, [nodeId], maxDimension ?? 1024)
-      return { content: [{ type: 'image', data: r.png, mimeType: 'image/png' }, { type: 'text', text: JSON.stringify({ width: r.width, height: r.height, original_width: r.original_width, original_height: r.original_height }) }] }
+      const target = await d.pageOrNodes(fileKey, [nodeId])
+      if (!target.ids.length) return d.ok('The page is empty — nothing to render.')
+      const { png, ...info } = await render(target.ctx.ix, target.ids, maxDimension ?? 1024, target.wholePage ? '#F5F5F5' : undefined)
+      return { content: [{ type: 'image', data: png, mimeType: 'image/png' }, { type: 'text', text: JSON.stringify(info) }] }
     },
   )
 
@@ -288,7 +291,7 @@ export function registerParity(d: ParityDeps) {
           1,
         ),
       })
-      if (!excludeScreenshot) content.push({ type: 'image', data: render(ix, [nodeId], 1024).png, mimeType: 'image/png' })
+      if (!excludeScreenshot) content.push({ type: 'image', data: (await render(ix, [nodeId], 1024)).png, mimeType: 'image/png' })
       return { content }
     },
   )
@@ -318,7 +321,7 @@ export function registerParity(d: ParityDeps) {
   tool('get_figjam', 'There are no FigJam boards in this workspace — diagrams made with generate_diagram are ordinary design layers. This returns the structure (XML) and a screenshot of a node, which is what you need to read such a diagram.', { fileKey, nodeId, includeImagesOfNodes: z.boolean().optional(), sessionId }, async ({ fileKey, nodeId, includeImagesOfNodes }) => {
     const ctx = await d.pageOfNodes(fileKey, [nodeId])
     const content: unknown[] = [{ type: 'text', text: metadataXml(ctx.ix, nodeId) }]
-    if (includeImagesOfNodes !== false) content.push({ type: 'image', data: render(ctx.ix, [nodeId], 1024).png, mimeType: 'image/png' })
+    if (includeImagesOfNodes !== false) content.push({ type: 'image', data: (await render(ctx.ix, [nodeId], 1024)).png, mimeType: 'image/png' })
     return { content }
   })
 
@@ -524,13 +527,28 @@ export function registerParity(d: ParityDeps) {
 
   // ---------- assets ----------
   tool(
+    'create_upload_urls',
+    'Get upload links for images or videos, so the bytes go straight to storage instead of through a tool call. Use this for anything beyond a few small images. For each link: HTTP POST the raw file bytes to it with a Content-Type header (image/png, image/jpeg, video/mp4, …); the JSON response is {"storageId": "..."}. Uploads can run in parallel. Then call upload_assets once with assets: [{storageId, nodeId?, name?}, …] to place them. Links expire after about an hour.',
+    { fileKey, count: z.number().int().min(1).max(100).describe('How many files you are going to upload') },
+    async ({ fileKey, count }) => {
+      const urls = (await convex.mutation(api.images.generateUploadUrls, { fileId: fileKey, count })) as string[]
+      return d.ok({
+        uploadUrls: urls,
+        howTo: 'POST each file to one link, e.g. curl -s -X POST -H "Content-Type: image/jpeg" --data-binary @photo.jpg "<uploadUrl>" → {"storageId":"…"}. Then upload_assets({ fileKey, assets: [{ storageId, nodeId }] }).',
+      })
+    },
+  )
+
+  tool(
     'upload_assets',
-    'Put images and SVGs into a file. Each asset is given as a local file path, a URL, base64 data or SVG markup. Raster images (PNG, JPG, GIF, WebP) become the image fill of nodeId when given, otherwise a new image layer on the page. SVGs are imported as editable vector layers. Max 10 MB per asset, 60 assets per call.',
+    'Put images, videos and SVGs into a file. Each asset is given as a storageId from create_upload_urls (best for many or large files), a URL, a local file path (local server only), base64 data (small files only: a tool call is limited to a few MB in total) or SVG markup. Raster images (PNG, JPG, GIF, WebP) and videos (MP4, WebM) become the fill of nodeId when given, otherwise a new layer on the page. SVGs are imported as editable vector layers. Up to 100 assets per call.',
     {
       fileKey,
       assets: z
         .array(
           z.object({
+            storageId: z.string().optional().describe('Id returned by an upload link from create_upload_urls'),
+            posterUrl: z.string().optional().describe('For videos: URL of a still image shown in previews and exports (otherwise the editor captures the first frame when the file is next opened)'),
             path: z.string().optional().describe('Local file path of the image / SVG'),
             url: z.string().optional().describe('http(s) URL to download the asset from'),
             base64: z.string().optional().describe('Base64-encoded file contents'),
@@ -541,16 +559,48 @@ export function registerParity(d: ParityDeps) {
           }),
         )
         .min(1)
-        .max(60),
+        .max(100),
       currentPageId: z.string().optional().describe('Page for new layers; defaults to the first page'),
       scaleMode: z.enum(['FILL', 'FIT', 'STRETCH', 'TILE']).optional(),
       sessionId,
     },
     async ({ fileKey, assets, currentPageId, scaleMode }) => {
       const results = []
-      for (const a of assets as { path?: string; url?: string; base64?: string; svg?: string; mimeType?: string; name?: string; nodeId?: string }[]) {
+      const mode = scaleMode === 'FIT' ? ('FIT' as const) : scaleMode === 'STRETCH' ? ('STRETCH' as const) : ('FILL' as const)
+      // Put an uploaded image or video on a node, or on a new layer next to the existing content.
+      const place = async (a: { name?: string; nodeId?: string; posterUrl?: string }, name: string, url: string, video: boolean, size: { w: number; h: number } | null) => {
+        const fill = (video ? { type: 'VIDEO', url, scaleMode: mode, ...(a.posterUrl ? { posterUrl: a.posterUrl } : {}) } : { type: 'IMAGE', url, scaleMode: mode }) as SceneNode['fills'] extends (infer P)[] | undefined ? P : never
+        const ctx = a.nodeId ? await d.pageOfNodes(fileKey, [a.nodeId]) : await d.loadPage(fileKey, currentPageId)
+        if (a.nodeId) {
+          await d.write(ctx, [{ op: 'update', id: a.nodeId, patch: { fills: [fill] } }], [a.nodeId])
+          return { name, type: video ? 'video' : 'image', targetNodeId: a.nodeId, url }
+        }
+        const at = rightOf(ctx)
+        const dim = size ?? (video ? { w: 640, h: 360 } : { w: 400, h: 300 })
+        const k = Math.min(1, 1200 / Math.max(dim.w, dim.h))
+        const node: SceneNode = { id: newId(), order: kids(ctx.ix, ROOT).length, type: 'RECTANGLE', name, x: at.x, y: at.y, width: Math.round(dim.w * k), height: Math.round(dim.h * k), fills: [fill] }
+        await d.write(ctx, [{ op: 'create', node }], [node.id])
+        return { name, type: video ? 'video' : 'image', nodeId: node.id, url, width: node.width, height: node.height }
+      }
+      for (const a of assets as { storageId?: string; posterUrl?: string; path?: string; url?: string; base64?: string; svg?: string; mimeType?: string; name?: string; nodeId?: string }[]) {
         let buf: Buffer
         let mime = a.mimeType
+        if (a.storageId) {
+          // Already in storage: only its type (and, for a new image layer, its dimensions) are needed.
+          const info = (await convex.query(api.images.info, { storageId: a.storageId })) as { url: string; contentType: string | null; size: number } | null
+          if (!info) throw new Error(`No upload with storageId ${a.storageId}. POST the file to a link from create_upload_urls first and use the storageId from its response.`)
+          mime ??= info.contentType ?? undefined
+          if (mime === 'image/svg+xml') throw new Error('Pass SVGs as svg markup or url, so they become editable vector layers')
+          const video = /^video\//.test(mime ?? '')
+          if (!video && !/^image\//.test(mime ?? '')) throw new Error(`Upload ${a.storageId} has type ${mime ?? 'unknown'}; send a Content-Type of image/* or video/* when uploading, or pass mimeType`)
+          let size: { w: number; h: number } | null = null
+          if (!video && !a.nodeId) {
+            const head = await fetch(info.url, { headers: { Range: 'bytes=0-262143' } })
+            if (head.ok) size = imageSize(Buffer.from(await head.arrayBuffer()))
+          }
+          results.push(await place(a, a.name ?? (video ? 'Video' : 'Image'), info.url, video, size))
+          continue
+        }
         if (a.svg) {
           buf = Buffer.from(a.svg, 'utf8')
           mime = 'image/svg+xml'
@@ -566,8 +616,8 @@ export function registerParity(d: ParityDeps) {
           buf = Buffer.from(await res.arrayBuffer())
           mime ??= res.headers.get('content-type')?.split(';')[0] ?? MIME[extname(new URL(a.url).pathname).toLowerCase()]
         } else if (a.base64) buf = Buffer.from(a.base64.replace(/^data:[^,]*,/, ''), 'base64')
-        else throw new Error('Each asset needs one of: path, url, base64, svg')
-        if (buf.length > 10 * 1024 * 1024) throw new Error('Assets are limited to 10 MB')
+        else throw new Error('Each asset needs one of: storageId, url, path, base64, svg')
+        if (buf.length > 100 * 1024 * 1024) throw new Error('Assets passed by url or path are limited to 100 MB; upload larger files through create_upload_urls')
         const head = buf.subarray(0, 300).toString('utf8')
         if (!mime && /<svg[\s>]/i.test(head)) mime = 'image/svg+xml'
         const name = a.name ?? (a.path ? a.path.split(/[\\/]/).pop()!.replace(/\.\w+$/, '') : mime === 'image/svg+xml' ? 'SVG' : 'Image')
@@ -581,24 +631,14 @@ export function registerParity(d: ParityDeps) {
           results.push({ name, type: 'svg', nodeId: nodes[0].id, layers: nodes.length - 1 })
           continue
         }
-        const size = imageSize(buf)
+        const size = /^video\//.test(mime ?? '') ? null : imageSize(buf)
         if (!size && !mime) throw new Error(`Could not recognise "${name}" as an image; pass mimeType`)
         const uploadUrl = await convex.mutation(api.images.generateUploadUrl, {})
         const res = await fetch(uploadUrl, { method: 'POST', headers: { 'Content-Type': mime ?? 'image/png' }, body: new Uint8Array(buf) })
         if (!res.ok) throw new Error(`Upload failed: HTTP ${res.status}`)
         const { storageId } = (await res.json()) as { storageId: string }
         const url = (await convex.mutation(api.images.getUrl, { storageId })) as string
-        const fill = { type: 'IMAGE' as const, url, scaleMode: scaleMode === 'FIT' ? ('FIT' as const) : scaleMode === 'STRETCH' ? ('STRETCH' as const) : ('FILL' as const) }
-        if (a.nodeId) {
-          await d.write(ctx, [{ op: 'update', id: a.nodeId, patch: { fills: [fill] } }], [a.nodeId])
-          results.push({ name, type: 'image', targetNodeId: a.nodeId, url })
-        } else {
-          const at = rightOf(ctx)
-          const k = size ? Math.min(1, 1200 / Math.max(size.w, size.h)) : 1
-          const node: SceneNode = { id: newId(), order: kids(ctx.ix, ROOT).length, type: 'RECTANGLE', name, x: at.x, y: at.y, width: Math.round((size?.w ?? 400) * k), height: Math.round((size?.h ?? 300) * k), fills: [fill] }
-          await d.write(ctx, [{ op: 'create', node }], [node.id])
-          results.push({ name, type: 'image', nodeId: node.id, url, width: node.width, height: node.height })
-        }
+        results.push(await place(a, name, url, /^video\//.test(mime ?? ''), size))
       }
       return ok({ uploaded: results })
     },
@@ -622,9 +662,9 @@ export function registerParity(d: ParityDeps) {
       const root = ix.byId.get(nodeId)!
       if (defaultFormat === 'svg') content.push({ type: 'text', text: JSON.stringify({ export: { format: 'svg', svg: exportSvg(ix, [nodeId], { measure: estimateMeasure, scale: defaultScale ?? 1 }).svg }, rawImages, svgAssets }, null, 1) })
       else {
-        const r = render(ix, [nodeId], Math.min(4096, Math.max(root.width, root.height, 1) * (defaultScale ?? 1)))
+        const r = await render(ix, [nodeId], Math.min(4096, Math.max(root.width, root.height, 1) * (defaultScale ?? 1)))
         content.push({ type: 'image', data: r.png, mimeType: 'image/png' })
-        content.push({ type: 'text', text: JSON.stringify({ export: { format: 'png', width: r.width, height: r.height, ...(defaultFormat && defaultFormat !== 'png' ? { note: `${defaultFormat} export is not available; PNG returned` } : {}) }, rawImages, svgAssets }, null, 1) })
+        content.push({ type: 'text', text: JSON.stringify({ export: { format: 'png', width: r.width, height: r.height, ...(r.warning ? { warning: r.warning } : {}), ...(defaultFormat && defaultFormat !== 'png' ? { note: `${defaultFormat} export is not available; PNG returned` } : {}) }, rawImages, svgAssets }, null, 1) })
       }
       return { content }
     },
@@ -643,7 +683,7 @@ export function registerParity(d: ParityDeps) {
       const nodes = buildDiagram(name, mermaidSyntax, at.x, at.y)
       nodes[0].order = kids(ctx.ix, ROOT).length
       const ix = await d.write(ctx, nodes.map((node) => ({ op: 'create' as const, node })), [nodes[0].id])
-      return { content: [{ type: 'text', text: JSON.stringify({ fileKey: fid, pageId: ctx.pageId, nodeId: nodes[0].id, layers: nodes.length - 1, url: d.fileUrl(fid) }) }, { type: 'image', data: render(ix, [nodes[0].id], 1024).png, mimeType: 'image/png' }] }
+      return { content: [{ type: 'text', text: JSON.stringify({ fileKey: fid, pageId: ctx.pageId, nodeId: nodes[0].id, layers: nodes.length - 1, url: d.fileUrl(fid) }) }, { type: 'image', data: (await render(ix, [nodes[0].id], 1024)).png, mimeType: 'image/png' }] }
     },
   )
 

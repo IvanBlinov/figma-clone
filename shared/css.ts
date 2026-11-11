@@ -1,13 +1,18 @@
 // CSS for a node, for the Inspect panel, "Copy as CSS" and the MCP get_css tool.
 import { cssColor, parentOf, ROOT, type DocIndex } from './doc'
 import { visiblePaints } from './paths'
-import { isAutoLayout, type Paint, type SceneNode } from './types'
+import { isAutoLayout, VIDEO_FALLBACK, type Paint, type SceneNode } from './types'
 
 const px = (v: number) => `${Math.round(v * 100) / 100}px`
 
 function paintCss(p: Paint): string | null {
   if (p.type === 'SOLID') return cssColor(p.color, p.opacity ?? 1)
-  if (p.type === 'IMAGE') return `url("${p.url}") center / ${p.scaleMode === 'FIT' ? 'contain' : p.scaleMode === 'STRETCH' ? '100% 100%' : 'cover'} no-repeat`
+  if (p.type === 'IMAGE' || p.type === 'VIDEO') {
+    // A video is represented by its poster frame.
+    const src = p.type === 'IMAGE' ? p.url : p.posterUrl
+    if (!src) return cssColor(VIDEO_FALLBACK, p.opacity ?? 1)
+    return `url("${src}") center / ${p.scaleMode === 'FIT' ? 'contain' : p.scaleMode === 'STRETCH' ? '100% 100%' : 'cover'} no-repeat`
+  }
   const stops = p.stops.map((s) => `${cssColor(s.color, (s.opacity ?? 1) * (p.opacity ?? 1))} ${Math.round(s.position * 100)}%`).join(', ')
   return p.type === 'GRADIENT_LINEAR' ? `linear-gradient(${(p.angle ?? 90) + 90}deg, ${stops})` : `radial-gradient(${stops})`
 }

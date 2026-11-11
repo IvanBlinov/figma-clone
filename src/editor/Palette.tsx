@@ -41,6 +41,7 @@ export function buildCommands(extra: Command[]): Command[] {
     tool('move', 'Move', 'V'),
     tool('hand', 'Hand', 'H'),
     tool('frame', 'Frame', 'F'),
+    tool('section', 'Section', 'Shift+S'),
     tool('rectangle', 'Rectangle', 'R'),
     tool('ellipse', 'Ellipse', 'O'),
     tool('line', 'Line', 'L'),

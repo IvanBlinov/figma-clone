@@ -1,7 +1,7 @@
 import { Component, Eye, EyeOff, LayoutGrid, Minus, Plus, Unlink } from 'lucide-react'
 import { useState } from 'react'
 import { cloneSubtrees, cssColor, descendants, kids, nextOrder, parentOf, ROOT } from '../../shared/doc'
-import { isAutoLayout, type Constraint, type LayoutGrid as Grid, type Paint, type SceneNode } from '../../shared/types'
+import { isAutoLayout, VIDEO_FALLBACK, type Constraint, type LayoutGrid as Grid, type Paint, type SceneNode } from '../../shared/types'
 import { createInstance, detachInstances, goToMainComponent, resetOverrides, swapInstance, update } from './actions'
 import { commit, S, useEditor } from './store'
 import { TEXT_STYLE_KEYS, textStyleOf, useStyles, type StyleDoc } from './stylesStore'
@@ -240,6 +240,7 @@ const paintsCss = (paints: Paint[] | undefined) => {
   if (!p) return 'transparent'
   if (p.type === 'SOLID') return cssColor(p.color, p.opacity ?? 1)
   if (p.type === 'IMAGE') return `center / cover url("${p.url}")`
+  if (p.type === 'VIDEO') return p.posterUrl ? `center / cover url("${p.posterUrl}")` : VIDEO_FALLBACK
   return `linear-gradient(${(p.angle ?? 90) + 90}deg, ${p.stops.map((s) => `${cssColor(s.color, s.opacity ?? 1)} ${s.position * 100}%`).join(', ')})`
 }
 

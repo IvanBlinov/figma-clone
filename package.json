@@ -8,7 +8,7 @@
     "dev:backend": "convex dev",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "build:mcp": "esbuild mcp/cli.ts --bundle --platform=node --format=esm --packages=external --outfile=mcp/dist/server.mjs",
+    "build:mcp": "node scripts/build-sandbox.mjs && esbuild mcp/cli.ts --bundle --platform=node --format=esm --packages=external --outfile=mcp/dist/server.mjs",
     "mcp": "node mcp/dist/server.mjs",
     "dev:backend:local": "cross-env CONVEX_AGENT_MODE=anonymous convex dev",
     "deploy:backend": "convex deploy"
@@ -21,6 +21,7 @@
     "convex": "^1.49.0",
     "lucide-react": "^1.71.0",
     "polygon-clipping": "^0.15.7",
+    "quickjs-emscripten": "^0.32.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "zod": "^4.6.7",

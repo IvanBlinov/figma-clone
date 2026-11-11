@@ -14,6 +14,7 @@ import {
   ArrowRight,
   Eye,
   EyeOff,
+  Film,
   Link2,
   Minus,
   MoreHorizontal,
@@ -28,8 +29,8 @@ import {
 import { useState } from 'react'
 import { cssColor, parentOf } from '../../shared/doc'
 import { stylesInRange } from '../../shared/text'
-import { isAutoLayout, nodeLabel, type BooleanOp, type Effect, type Paint, type SceneNode, type Sizing } from '../../shared/types'
-import { addAutoLayout, alignSelection, booleanOperation, commitDraft, distributeSelection, placeImageUrl, preview, removeAutoLayout, sizeSideEffects, styleText, update } from './actions'
+import { isAutoLayout, nodeLabel, VIDEO_FALLBACK, type BooleanOp, type Effect, type Paint, type SceneNode, type Sizing } from '../../shared/types'
+import { addAutoLayout, alignSelection, booleanOperation, commitDraft, distributeSelection, placeImageUrl, preview, removeAutoLayout, sizeSideEffects, styleText, update, uploadVideo } from './actions'
 import { exportNodes } from './export'
 import { FONTS } from './fonts'
 import { ComponentSection, ConstraintsSection, GridSection, hasTextStyleKey, LocalStyles, StyleButton, StyleChip } from './PanelExtras'
@@ -48,20 +49,22 @@ function same<T>(nodes: SceneNode[], get: (n: SceneNode) => T): T | undefined {
 export function paintCss(p: Paint): string {
   if (p.type === 'SOLID') return cssColor(p.color, p.opacity ?? 1)
   if (p.type === 'IMAGE') return `center / cover url("${p.url}")`
+  if (p.type === 'VIDEO') return p.posterUrl ? `center / cover url("${p.posterUrl}")` : VIDEO_FALLBACK
   const stops = p.stops.map((s) => `${cssColor(s.color, s.opacity ?? 1)} ${s.position * 100}%`).join(', ')
   return p.type === 'GRADIENT_LINEAR' ? `linear-gradient(${(p.angle ?? 90) + 90}deg, ${stops})` : `radial-gradient(${stops})`
 }
 
-const paintLabel = (p: Paint) => (p.type === 'SOLID' ? p.color.replace('#', '') : p.type === 'IMAGE' ? 'Image' : p.type === 'GRADIENT_LINEAR' ? 'Linear' : 'Radial')
+const paintLabel = (p: Paint) => (p.type === 'SOLID' ? p.color.replace('#', '') : p.type === 'IMAGE' ? 'Image' : p.type === 'VIDEO' ? 'Video' : p.type === 'GRADIENT_LINEAR' ? 'Linear' : 'Radial')
 
 function PaintEditor({ paint, onChange }: { paint: Paint; onChange: (p: Paint, mode: ChangeMode) => void }) {
   const [stopIdx, setStopIdx] = useState(0)
   const setType = (type: Paint['type']) => {
     if (type === paint.type) return
     const base = { opacity: paint.opacity, visible: paint.visible }
-    const color = paint.type === 'SOLID' ? paint.color : paint.type === 'IMAGE' ? '#D9D9D9' : paint.stops[0].color
+    const media = paint.type === 'IMAGE' || paint.type === 'VIDEO' ? paint : null
+    const color = paint.type === 'SOLID' ? paint.color : media ? '#D9D9D9' : ((paint as { stops?: { color: string }[] }).stops?.[0]?.color ?? '#D9D9D9')
     if (type === 'SOLID') onChange({ type, color, ...base }, 'commit')
-    else if (type === 'IMAGE') onChange({ type, url: '', scaleMode: 'FILL', ...base }, 'commit')
+    else if (type === 'IMAGE' || type === 'VIDEO') onChange({ type, url: '', scaleMode: media?.scaleMode ?? 'FILL', ...base }, 'commit')
     else
       onChange(
         {
@@ -90,6 +93,7 @@ function PaintEditor({ paint, onChange }: { paint: Paint; onChange: (p: Paint, m
             { value: 'GRADIENT_LINEAR', label: 'Linear gradient' },
             { value: 'GRADIENT_RADIAL', label: 'Radial gradient' },
             { value: 'IMAGE', label: 'Image' },
+            { value: 'VIDEO', label: 'Video' },
           ]}
         />
       </div>
@@ -182,6 +186,58 @@ function PaintEditor({ paint, onChange }: { paint: Paint; onChange: (p: Paint, m
           </div>
         </div>
       )}
+      {paint.type === 'VIDEO' && <VideoPaintEditor paint={paint} onChange={onChange} />}
+    </div>
+  )
+}
+
+function VideoPaintEditor({ paint, onChange }: { paint: Extract<Paint, { type: 'VIDEO' }>; onChange: (p: Paint, mode: ChangeMode) => void }) {
+  const [busy, setBusy] = useState(false)
+  // A different file starts without a poster: the old one shows another video.
+  const setUrl = (url: string, posterUrl?: string) => {
+    const { posterUrl: _old, ...rest } = paint
+    onChange({ ...rest, url, ...(posterUrl ? { posterUrl } : {}) }, 'commit')
+  }
+  return (
+    <div className="col">
+      <div className="image-preview video-preview" style={{ background: paintCss(paint) }}>
+        <Film size={18} />
+        <span>{busy ? 'Uploading…' : paint.url ? (paint.posterUrl ? '' : 'Poster is captured when the video loads') : 'No video yet'}</span>
+      </div>
+      <TextInput value={paint.url} placeholder="Video URL (mp4 / webm)" onCommit={(url) => url !== paint.url && setUrl(url.trim())} />
+      <div className="row">
+        <label className="link-btn">
+          Upload…
+          <input
+            type="file"
+            accept="video/mp4,video/webm,.mp4,.webm"
+            hidden
+            onChange={async (e) => {
+              const f = e.target.files?.[0]
+              e.target.value = ''
+              if (!f) return
+              setBusy(true)
+              try {
+                const v = await uploadVideo(f)
+                setUrl(v.url, v.posterUrl)
+              } catch {
+                /* upload failed: keep the current video */
+              } finally {
+                setBusy(false)
+              }
+            }}
+          />
+        </label>
+        <Select
+          value={paint.scaleMode ?? 'FILL'}
+          onChange={(scaleMode) => onChange({ ...paint, scaleMode }, 'commit')}
+          options={[
+            { value: 'FILL', label: 'Fill' },
+            { value: 'FIT', label: 'Fit' },
+            { value: 'STRETCH', label: 'Stretch' },
+          ]}
+        />
+      </div>
     </div>
   )
 }
@@ -627,6 +683,8 @@ export function PropertiesPanel({ fileName, onPageBg }: { fileName: string; onPa
   const flow = inAL && nodes.every((n) => n.layoutPositioning !== 'ABSOLUTE')
   const allText = nodes.every((n) => n.type === 'TEXT')
   const anyFrame = nodes.some((n) => n.type === 'FRAME')
+  // Sections never clip and have no auto layout, so those controls are hidden for them.
+  const anySection = nodes.some((n) => n.isSection)
   const hasCorners = nodes.every((n) => n.type === 'RECTANGLE' || n.type === 'FRAME')
   const noPaint = nodes.every((n) => n.type === 'GROUP' && !n.booleanOp)
   const header = nodes.length === 1 ? nodeLabel(nodes[0]) : `${nodes.length} selected`
@@ -746,7 +804,7 @@ export function PropertiesPanel({ fileName, onPageBg }: { fileName: string; onPa
             <Select className="grow" title="Vertical resizing" value={same(nodes, (n) => sizingOf(n, 'V'))} options={sizingOptions('V')} onChange={(v) => setSizing('V', v)} />
           </div>
         )}
-        {anyFrame && (
+        {anyFrame && !anySection && (
           <div className="row">
             <label className="check">
               <input type="checkbox" checked={!!same(nodes, (n) => n.clipsContent !== false)} onChange={(e) => set({ clipsContent: e.target.checked }, 'commit')} /> Clip content
@@ -756,7 +814,7 @@ export function PropertiesPanel({ fileName, onPageBg }: { fileName: string; onPa
       </Section>
 
       <ConstraintsSection nodes={nodes} set={set} />
-      {!nodes.some((n) => n.booleanOp || n.sourceId || n.componentId) || nodes.every(isAutoLayout) ? <AutoLayout nodes={nodes} set={set} /> : null}
+      {!anySection && (!nodes.some((n) => n.booleanOp || n.sourceId || n.componentId) || nodes.every(isAutoLayout)) ? <AutoLayout nodes={nodes} set={set} /> : null}
       <GridSection nodes={nodes} set={set} />
 
       <Section title="Appearance">

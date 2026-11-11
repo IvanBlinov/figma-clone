@@ -4,13 +4,13 @@ import { ChevronLeft, ChevronRight, Maximize, RotateCcw, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
-import { buildIndex, computeWorld, descendants, kids, ROOT, type DocIndex } from '../shared/doc'
+import { buildIndex, computeWorld, descendants, screenFrames, type DocIndex } from '../shared/doc'
 import type { Mat } from '../shared/geometry'
 import { runLayout } from '../shared/layout'
 import type { Reaction, SceneNode } from '../shared/types'
 import { ensureFont, measureText, onFontsChanged } from './editor/fonts'
 import { hitPath } from './editor/hit'
-import { drawNodes, setImageLoadCallback } from './editor/render'
+import { drawNodes, setImageLoadCallback, videosPlayingSince } from './editor/render'
 
 interface Doc {
   ix: DocIndex
@@ -102,7 +102,8 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
   useEffect(() => {
     const bump = () => setTick((t) => t + 1)
     const a = onFontsChanged(bump)
-    const b = setImageLoadCallback(bump)
+    // Images and video frames do not change the layout: repainting is enough.
+    const b = setImageLoadCallback(() => redraw.current())
     return () => {
       a()
       b()
@@ -113,7 +114,8 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     if (!stored) return null
     for (const n of stored) if (n.type === 'TEXT') ensureFont(n.fontFamily ?? 'Inter', n.fontWeight ?? 400, !!n.italic)
     const res = runLayout(stored, measureText)
-    const frames = kids(res.index, ROOT).filter((id) => res.index.byId.get(id)!.type === 'FRAME' && res.index.byId.get(id)!.visible !== false)
+    // Screens are the top-level frames; sections only group them.
+    const frames = screenFrames(res.index).filter((id) => res.index.byId.get(id)!.visible !== false)
     return { ix: res.index, world: computeWorld(res.index), frames }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stored, tick])
@@ -151,7 +153,10 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     const vh = window.innerHeight - 48
     const base = d.ix.byId.get(state.current.stack[state.current.stack.length - 1]?.id ?? id) ?? f
     const s = Math.min(1, vw / base.width, vh / base.height)
-    return { f, s, x: (vw - f.width * s) / 2, y: (vh - f.height * s) / 2 }
+    // Where the frame sits on the page (it may be inside a section) and the transform of what contains it.
+    const m = d.world.get(id)
+    const pm = f.parentId ? d.world.get(f.parentId) : undefined
+    return { f, s, x: (vw - f.width * s) / 2, y: (vh - f.height * s) / 2, wx: m ? m[4] : f.x, wy: m ? m[5] : f.y, pm }
   }
 
   // ---------- actions ----------
@@ -237,7 +242,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     const lx = (cx - l.x) / l.s
     const ly = (cy - l.y) / l.s
     if (lx < 0 || ly < 0 || lx > l.f.width || ly > l.f.height) return null
-    const p = { x: l.f.x + lx, y: l.f.y + ly }
+    const p = { x: l.wx + lx, y: l.wy + ly }
     const path = hitPath({ doc: d.ix, world: d.world, viewport: { x: 0, y: 0, zoom: l.s } }, p, undefined, frame)
     return [...path.reverse(), frame]
   }
@@ -263,6 +268,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     let raf = 0
     const draw = () => {
       raf = 0
+      const t0 = performance.now()
       const d = docRef.current
       const st = state.current
       const dpr = window.devicePixelRatio || 1
@@ -289,7 +295,8 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
         if (ox || oy) ctx.clip()
         ctx.globalAlpha = alpha
         const k = l.s * dpr
-        ctx.setTransform(k, 0, 0, k, (l.x + ox) * dpr - l.f.x * k, (l.y + oy) * dpr - l.f.y * k)
+        ctx.setTransform(k, 0, 0, k, (l.x + ox) * dpr - l.wx * k, (l.y + oy) * dpr - l.wy * k)
+        if (l.pm) ctx.transform(l.pm[0], l.pm[1], l.pm[2], l.pm[3], l.pm[4], l.pm[5])
         drawNodes(ctx, ix, [id], k)
         ctx.restore()
       }
@@ -352,9 +359,11 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
           const n = d.ix.byId.get(id)!
           if (id === host || !n.reactions?.some((r) => r.trigger === 'ON_CLICK' || r.trigger === 'ON_PRESS')) continue
           const m = d.world.get(id)!
-          ctx.fillRect(l.x + (m[4] - l.f.x) * l.s, l.y + (m[5] - l.f.y) * l.s, n.width * l.s, n.height * l.s)
+          ctx.fillRect(l.x + (m[4] - l.wx) * l.s, l.y + (m[5] - l.wy) * l.s, n.width * l.s, n.height * l.s)
         }
       }
+      // Video fills: keep painting while a video that was just drawn is playing.
+      if (videosPlayingSince(t0)) again = true
       if (again) raf = requestAnimationFrame(draw)
     }
     redraw.current = () => {
@@ -366,6 +375,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     return () => {
       window.removeEventListener('resize', onResize)
       cancelAnimationFrame(raf)
+      videosPlayingSince(Infinity) // pause and release every video
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

@@ -1,7 +1,8 @@
 {
   "node": {
     "externalPackages": [
-      "@resvg/resvg-js"
+      "@resvg/resvg-js",
+      "quickjs-emscripten"
     ]
   }
 }

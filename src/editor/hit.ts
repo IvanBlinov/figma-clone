@@ -85,8 +85,10 @@ export function pick(st: HitState & Pick<EditorState, 'selection'>, p: Pt, deep 
   if (!path.length) return null
   if (deep) return path[path.length - 1]
   let i = 0
-  const top = st.doc.byId.get(path[0])!
-  if (top.type === 'FRAME' && path.length > 1) i = 1
+  // Sections only organise the canvas: what sits in them behaves as if it were directly on the page.
+  while (i < path.length - 1 && st.doc.byId.get(path[i])!.isSection) i++
+  const top = st.doc.byId.get(path[i])!
+  if (top.type === 'FRAME' && !top.isSection && i < path.length - 1) i++
   // Stay inside the container the user has already drilled into.
   const entered = new Set<string>()
   for (const id of st.selection) {

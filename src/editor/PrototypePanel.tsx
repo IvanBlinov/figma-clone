@@ -1,5 +1,5 @@
 import { Minus, Play, Plus } from 'lucide-react'
-import { kids, ROOT } from '../../shared/doc'
+import { screenFrames } from '../../shared/doc'
 import type { Reaction, SceneNode } from '../../shared/types'
 import { topFrameOf, update } from './actions'
 import { useEditor } from './store'
@@ -30,9 +30,7 @@ const TRANSITIONS: { value: NonNullable<Reaction['transition']>; label: string }
 export function PrototypePanel({ onPresent }: { onPresent: (frameId?: string) => void }) {
   const selection = useEditor((s) => s.selection)
   const doc = useEditor((s) => s.doc)
-  const frames = kids(doc, ROOT)
-    .map((id) => doc.byId.get(id)!)
-    .filter((n) => n.type === 'FRAME')
+  const frames = screenFrames(doc).map((id) => doc.byId.get(id)!)
   const flows = frames.filter((f) => f.flowStart)
   const n: SceneNode | undefined = selection.length === 1 ? doc.byId.get(selection[0]) : undefined
 
@@ -69,7 +67,7 @@ export function PrototypePanel({ onPresent }: { onPresent: (frameId?: string) =>
   const at = (i: number, patch: Partial<Reaction>) => put(reactions.map((r, j) => (j === i ? { ...r, ...patch } : r)))
   const own = topFrameOf(n.id)
   const dests = frames.filter((f) => f.id !== n.id).map((f) => ({ value: f.id, label: f.name + (f.id === own ? ' (this frame)' : '') }))
-  const isTop = n.type === 'FRAME' && !n.parentId
+  const isTop = frames.some((f) => f.id === n.id)
   const add = () => {
     const dest = dests.find((d) => d.value !== own)?.value
     put([...reactions, { trigger: reactions.some((r) => r.trigger === 'ON_CLICK') ? 'ON_HOVER' : 'ON_CLICK', action: dest ? 'NAVIGATE' : 'BACK', destinationId: dest, transition: 'DISSOLVE', duration: 300, easing: 'EASE_OUT' }])

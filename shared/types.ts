@@ -18,6 +18,8 @@ export type Paint =
       visible?: boolean
     }
   | { type: 'IMAGE'; url: string; scaleMode?: 'FILL' | 'FIT' | 'STRETCH'; opacity?: number; visible?: boolean }
+  // `url` is an MP4/WebM file; `posterUrl` is a still of its first frame (shown until the video loads, and used by exports).
+  | { type: 'VIDEO'; url: string; posterUrl?: string; scaleMode?: 'FILL' | 'FIT' | 'STRETCH'; opacity?: number; visible?: boolean }
 
 export type Effect =
   | {
@@ -162,6 +164,8 @@ export interface SceneNode {
   // Nodes inside an instance mirror the component's nodes (sourceId) and list the props they override.
   isComponent?: boolean
   isComponentSet?: boolean
+  // A FRAME with isSection is a section: it never clips, has no auto layout, and shows its name above its corner at any depth.
+  isSection?: boolean
   description?: string
   componentId?: string
   sourceId?: string
@@ -216,11 +220,19 @@ export function nodeLabel(n: SceneNode): string {
   if (n.isComponentSet) return 'Component set'
   if (n.isComponent) return 'Component'
   if (n.componentId) return 'Instance'
+  if (n.isSection) return 'Section'
   if (n.booleanOp) return BOOL_LABEL[n.booleanOp]
   if (n.isMask) return 'Mask'
   if (n.type === 'LINE' && (n.arrowEnd || n.arrowStart)) return 'Arrow'
   return TYPE_LABEL[n.type]
 }
+export const isSection = (n: SceneNode) => n.type === 'FRAME' && !!n.isSection
+/** Properties of a freshly created section (on top of type FRAME). */
+export function sectionDefaults(): Partial<SceneNode> {
+  return { isSection: true, clipsContent: false, fills: [{ type: 'SOLID', color: '#F5F5F5' }], strokes: [], cornerRadius: 2 }
+}
+/** Flat colour standing in for a video that has no poster (exports, CSS, swatches). */
+export const VIDEO_FALLBACK = '#1F1F1F'
 export const inInstance = (n: SceneNode) => !!n.componentId || !!n.sourceId
 
 /** Defaults applied when a node of a given type is created (by tools or by agents). */

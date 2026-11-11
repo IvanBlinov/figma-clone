@@ -1,7 +1,7 @@
 // A Figma Plugin API compatible scripting surface (`figma` global) over the clone's document model.
 // Used by the use_figma tool: scripts written for Figma's plugin API run against in-memory copies of the
 // file's pages; the caller diffs the result and stores it.
-import vm from 'node:vm'
+// This module must stay free of Node APIs: it is bundled and executed inside the QuickJS sandbox (see sandbox.ts).
 import { buildIndex, descendants, kids, worldMatrix, type DocIndex } from '../shared/doc'
 import { boundsOf, corners } from '../shared/geometry'
 import { svgToNodes } from '../shared/svgParse'
@@ -67,6 +67,11 @@ function paintsFromFigma(list: unknown): Paint[] {
       if (!url) throw new Error('IMAGE paints need imageHash (use the hash from figma.createImageAsync(url)) or url')
       return { type: 'IMAGE', url, scaleMode: p.scaleMode === 'FIT' ? 'FIT' : p.scaleMode === 'CROP' || p.scaleMode === 'STRETCH' ? 'STRETCH' : 'FILL', ...base } as Paint
     }
+    if (p.type === 'VIDEO') {
+      const url = (p.url ?? p.videoHash) as string
+      if (!url) throw new Error('VIDEO paints need url')
+      return { type: 'VIDEO', url, ...(p.posterUrl ? { posterUrl: p.posterUrl as string } : {}), scaleMode: p.scaleMode === 'FIT' ? 'FIT' : p.scaleMode === 'CROP' || p.scaleMode === 'STRETCH' ? 'STRETCH' : 'FILL', ...base } as Paint
+    }
     throw new Error(`Unsupported paint type ${String(p.type)}`)
   })
 }
@@ -76,6 +81,7 @@ function paintsToFigma(list: Paint[] | undefined): Rec[] {
     const base = { visible: p.visible !== false, opacity: p.opacity ?? 1, blendMode: 'NORMAL' }
     if (p.type === 'SOLID') return { type: 'SOLID', color: toRgb(p.color), ...base }
     if (p.type === 'IMAGE') return { type: 'IMAGE', imageHash: p.url, scaleMode: p.scaleMode ?? 'FILL', ...base }
+    if (p.type === 'VIDEO') return { type: 'VIDEO', videoHash: p.url, url: p.url, ...(p.posterUrl ? { posterUrl: p.posterUrl } : {}), scaleMode: p.scaleMode ?? 'FILL', ...base }
     const a = ((p.angle ?? 0) * Math.PI) / 180
     return {
       type: p.type,
@@ -122,7 +128,7 @@ const DIRECT = new Set([
 const NULLABLE = new Set(['minWidth', 'maxWidth', 'minHeight', 'maxHeight'])
 const IGNORED = new Set(['expanded', 'exportSettings', 'strokeMiterLimit', 'strokeJoin', 'relativeTransform', 'paragraphSpacing', 'paragraphIndent', 'listSpacing', 'hangingPunctuation', 'hangingList', 'leadingTrim', 'strokesIncludedInLayout', 'itemReverseZIndex', 'cornerSmoothing', 'effectStyleId', 'gridStyleId', 'targetAspectRatio', 'annotations', 'devStatus', 'guides', 'overflowDirection', 'numberOfFixedChildren', 'counterAxisAlignContent', 'layoutAlign2', 'fontKerning', 'openTypeFeatures', 'hyperlink', 'textTruncation', 'maxLines'])
 
-export async function runFigmaCode(
+export async function runFigmaCodeInline(
   code: string,
   pages: PageModel[],
   currentPageId: string,
@@ -270,7 +276,7 @@ export async function runFigmaCode(
     return g
   }
 
-  const figType = (n: SceneNode) => (n.isComponentSet ? 'COMPONENT_SET' : n.isComponent ? 'COMPONENT' : n.componentId ? 'INSTANCE' : n.booleanOp ? 'BOOLEAN_OPERATION' : n.type)
+  const figType = (n: SceneNode) => (n.isSection ? 'SECTION' : n.isComponentSet ? 'COMPONENT_SET' : n.isComponent ? 'COMPONENT' : n.componentId ? 'INSTANCE' : n.booleanOp ? 'BOOLEAN_OPERATION' : n.type)
 
   const methods: Record<string, (n: SceneNode) => unknown> = {
     appendChild: (n) => (child: unknown) => attach(unwrap(child), pageOf.get(n.id)!, n.id),
@@ -668,7 +674,7 @@ export async function runFigmaCode(
     getNodeById: getNode,
     getNodeByIdAsync: async (id: string) => getNode(id),
     createFrame: () => wrap(create('FRAME', { name: 'Frame' })),
-    createSection: () => wrap(create('FRAME', { name: 'Section', clipsContent: false, fills: [{ type: 'SOLID', color: '#F5F5F5' }] })),
+    createSection: () => wrap(create('FRAME', { name: 'Section', isSection: true, clipsContent: false, cornerRadius: 2, fills: [{ type: 'SOLID', color: '#F5F5F5' }] })),
     createRectangle: () => wrap(create('RECTANGLE', { name: 'Rectangle' })),
     createEllipse: () => wrap(create('ELLIPSE', { name: 'Ellipse' })),
     createLine: () => wrap(create('LINE', { name: 'Line', width: 100, height: 0 })),
@@ -829,13 +835,9 @@ export async function runFigmaCode(
     error: (...a: unknown[]) => void logs.push('error: ' + a.map(fmt).join(' ')),
   }
 
-  const context = vm.createContext({ figma, console: con, setTimeout, clearTimeout, Promise, JSON, Math, Date, Array, Object, String, Number, Boolean, Map, Set, RegExp, Error, Symbol, parseInt, parseFloat, isNaN, structuredClone })
-  const script = new vm.Script(`(async () => {\n${code}\n})()`, { filename: 'use_figma.js' })
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const result = await Promise.race([
-    script.runInContext(context, { timeout: 15000 }) as Promise<unknown>,
-    new Promise((_r, reject) => (timer = setTimeout(() => reject(new Error('Script timed out after 30s')), 30000))),
-  ]).finally(() => clearTimeout(timer))
+  // The caller-supplied code runs in this same realm; isolation, time and memory limits come from the sandbox around it.
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...params: string[]) => (...args: unknown[]) => Promise<unknown>
+  const result = await new AsyncFunction('figma', 'console', code)(figma, con)
 
   return { result: plain(result, 0), logs, warnings: [...warnings], selection, currentPageId: current.pageId }
 }
@@ -862,6 +864,9 @@ Supported:
 - Vectors: vectorPaths = [{windingRule, data}] (SVG path data in the node's width × height box — call resize first).
 - Components: instance.mainComponent, detachInstance(), swapComponent(component); edits to instance layers become overrides.
 - Styles: figma.createPaintStyle() / createTextStyle(), getLocalPaintStylesAsync() / getLocalTextStylesAsync(), node.fillStyleId / textStyleId.
+
+- Sections: figma.createSection() (type 'SECTION'); video fills: {type:'VIDEO', url, posterUrl?} in fills.
+- Limits: the script has 15 seconds and 128 MB, and no network, timers that wait, or Node / browser globals; setTimeout callbacks run immediately.
 
 Not supported (throws or is ignored with a warning): variables, effect/grid styles, exportAsync (use get_screenshot / download_assets),
 plugin data, flatten, FigJam / Slides nodes, and any property not listed above.`

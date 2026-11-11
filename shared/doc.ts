@@ -46,6 +46,18 @@ export function descendants(ix: DocIndex, id: string): string[] {
   return out
 }
 
+/** Prototype screens: the page's top-level frames, looking through sections (which only organise them). */
+export function screenFrames(ix: DocIndex, parent: string = ROOT): string[] {
+  const out: string[] = []
+  for (const id of kids(ix, parent)) {
+    const n = ix.byId.get(id)!
+    if (n.type !== 'FRAME') continue
+    if (n.isSection) out.push(...screenFrames(ix, id))
+    else out.push(id)
+  }
+  return out
+}
+
 export function ancestors(ix: DocIndex, id: string): string[] {
   const out: string[] = []
   let p = parentOf(ix, id)
