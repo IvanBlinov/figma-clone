@@ -61,7 +61,8 @@ export interface Constraints {
 /** Prototype interaction. */
 export interface Reaction {
   trigger: 'ON_CLICK' | 'ON_HOVER' | 'ON_PRESS' | 'AFTER_TIMEOUT'
-  action: 'NAVIGATE' | 'OVERLAY' | 'CLOSE_OVERLAY' | 'BACK' | 'URL'
+  /** SWAP_OVERLAY replaces the open overlay with the destination (Figma's "Swap overlay"). */
+  action: 'NAVIGATE' | 'OVERLAY' | 'SWAP_OVERLAY' | 'CLOSE_OVERLAY' | 'BACK' | 'URL'
   destinationId?: string
   url?: string
   transition?: 'INSTANT' | 'DISSOLVE' | 'SMART_ANIMATE' | 'MOVE_IN' | 'PUSH' | 'SLIDE_IN'
@@ -128,7 +129,8 @@ export interface SceneNode {
   paddingTop?: number
   paddingBottom?: number
   primaryAxisAlignItems?: 'MIN' | 'CENTER' | 'MAX' | 'SPACE_BETWEEN'
-  counterAxisAlignItems?: 'MIN' | 'CENTER' | 'MAX'
+  /** BASELINE lines up the first text baselines of a horizontal row's children. */
+  counterAxisAlignItems?: 'MIN' | 'CENTER' | 'MAX' | 'BASELINE'
   // Any node (meaningful inside auto-layout parents, and on auto-layout frames themselves)
   layoutSizingHorizontal?: Sizing
   layoutSizingVertical?: Sizing

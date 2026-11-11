@@ -586,6 +586,12 @@ function AutoLayout({ nodes, set }: { nodes: SceneNode[]; set: (p: Patch, m: Cha
           )}
         </div>
         <div className="col grow">
+          {horiz && (
+            <label className="row check" title="Line up the children's first text baselines">
+              <input type="checkbox" checked={cAlign === 'BASELINE'} onChange={(e) => set({ counterAxisAlignItems: e.target.checked ? 'BASELINE' : 'MIN' }, 'commit')} />
+              <span>Text baseline</span>
+            </label>
+          )}
           <NumInput
             label="↔"
             title="Horizontal padding"

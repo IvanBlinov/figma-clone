@@ -48,7 +48,7 @@ export function cssOf(ix: DocIndex, n: SceneNode): [string, string][] {
     if (n.layoutWrap) out.push(['flex-wrap', 'wrap'])
     const j = n.primaryAxisAlignItems ?? 'MIN'
     const a = n.counterAxisAlignItems ?? 'MIN'
-    const map = { MIN: 'flex-start', CENTER: 'center', MAX: 'flex-end', SPACE_BETWEEN: 'space-between' } as const
+    const map = { MIN: 'flex-start', CENTER: 'center', MAX: 'flex-end', SPACE_BETWEEN: 'space-between', BASELINE: 'baseline' } as const
     out.push(['justify-content', map[j]], ['align-items', map[a]])
     if (n.itemSpacing && j !== 'SPACE_BETWEEN') out.push(['gap', px(n.itemSpacing)])
     const pads = [n.paddingTop ?? 0, n.paddingRight ?? 0, n.paddingBottom ?? 0, n.paddingLeft ?? 0]

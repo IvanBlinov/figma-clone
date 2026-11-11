@@ -266,6 +266,13 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
           redraw.current()
         }
         break
+      case 'SWAP_OVERLAY':
+        if (r.destinationId && d.ix.byId.has(r.destinationId)) {
+          st.overlays.pop()
+          st.overlays.push({ id: r.destinationId, via: r, scroll: {}, t0: performance.now() })
+          redraw.current()
+        }
+        break
       case 'CLOSE_OVERLAY':
         st.overlays.pop()
         redraw.current()
@@ -284,12 +291,21 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     }
   }
 
+  /** Screens the arrow keys walk through: those in the current screen's section (a page may hold several flows), never main components. */
+  const sequence = (cur: string): string[] => {
+    const d = docRef.current!
+    const section = d.ix.byId.get(cur)?.parentId
+    return d.frames.filter((id) => {
+      const n = d.ix.byId.get(id)!
+      return !n.isComponent && !n.isComponentSet && (n.parentId === section || id === cur)
+    })
+  }
   const step = (dir: 1 | -1) => {
     const d = docRef.current
     const cur = top()
     if (!d || !cur) return
-    const i = d.frames.indexOf(cur)
-    const next = d.frames[i + dir]
+    const list = sequence(cur)
+    const next = list[list.indexOf(cur) + dir]
     if (next) go(next)
   }
   const restart = () => {
@@ -635,7 +651,8 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
         </div>
       </div>
     )
-  const index = doc && current ? doc.frames.indexOf(current) : -1
+  const seq = doc && current && doc.ix.byId.has(current) ? sequence(current) : []
+  const index = current ? seq.indexOf(current) : -1
   const name = doc && current ? doc.ix.byId.get(current)?.name : ''
   return (
     <div className="player">
@@ -659,9 +676,9 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
           <ChevronLeft size={16} />
         </button>
         <span className="player-count">
-          {name} · {index + 1} / {doc?.frames.length ?? 0}
+          {name} · {index + 1} / {seq.length}
         </span>
-        <button className="player-btn" title="Next frame (→)" disabled={!doc || index >= doc.frames.length - 1} onClick={() => step(1)}>
+        <button className="player-btn" title="Next frame (→)" disabled={!doc || index >= seq.length - 1} onClick={() => step(1)}>
           <ChevronRight size={16} />
         </button>
         <span className="grow" />

@@ -5,8 +5,10 @@
 import { descendants, kids, worldMatrix, type DocIndex } from '../shared/doc'
 import { boundsOf, corners } from '../shared/geometry'
 import { svgToNodes } from '../shared/svgParse'
-import { styleRange } from '../shared/text'
-import { defaultsFor, newId, type Effect, type NodeType, type Paint, type SceneNode, type TextRunStyle } from '../shared/types'
+import { overrideKeys } from '../shared/resolve'
+import { estimateMeasure, styleRange } from '../shared/text'
+import { runLayout } from '../shared/layout'
+import { defaultsFor, isAutoLayout, newId, type Effect, type NodeType, type Paint, type SceneNode, type TextRunStyle } from '../shared/types'
 
 export interface PageModel {
   pageId: string
@@ -98,6 +100,75 @@ function paintsToFigma(list: Paint[] | undefined): Rec[] {
   })
 }
 
+// ---------- prototyping: Figma's reaction shape <-> this file's ----------
+type CloneReaction = NonNullable<SceneNode['reactions']>[number]
+const TRIGGERS = ['ON_CLICK', 'ON_HOVER', 'ON_PRESS', 'AFTER_TIMEOUT'] as const
+const TRANSITIONS = ['DISSOLVE', 'SMART_ANIMATE', 'MOVE_IN', 'PUSH', 'SLIDE_IN'] as const
+const EASINGS = ['LINEAR', 'EASE_IN', 'EASE_OUT', 'EASE_IN_OUT'] as const
+const pick = <T extends string>(v: unknown, list: readonly T[]): T | undefined => (list as readonly string[]).includes(v as string) ? (v as T) : undefined
+
+/** Figma reactions ({trigger:{type}, actions:[{type:'NODE', destinationId, navigation, transition}]}) in this file's shape. Already-converted ones pass through. */
+export function reactionsFromFigma(list: unknown): CloneReaction[] {
+  if (!Array.isArray(list)) return []
+  const out: CloneReaction[] = []
+  for (const r of list as Rec[]) {
+    if (typeof r.trigger === 'string') {
+      out.push(r as unknown as CloneReaction)
+      continue
+    }
+    const t = (r.trigger ?? {}) as Rec
+    const trigger = pick(t.type === 'MOUSE_ENTER' ? 'ON_HOVER' : t.type, TRIGGERS) ?? 'ON_CLICK'
+    const timeout = trigger === 'AFTER_TIMEOUT' && typeof t.timeout === 'number' ? Math.round(t.timeout * 1000) : undefined
+    const actions = (Array.isArray(r.actions) ? r.actions : r.action ? [r.action] : []) as Rec[]
+    for (const a of actions.slice(0, 1)) {
+      const base: Rec = { trigger, ...(timeout !== undefined ? { timeout } : {}) }
+      if (a.type === 'BACK') out.push({ ...base, action: 'BACK' } as CloneReaction)
+      else if (a.type === 'CLOSE') out.push({ ...base, action: 'CLOSE_OVERLAY' } as CloneReaction)
+      else if (a.type === 'URL' && typeof a.url === 'string') out.push({ ...base, action: 'URL', url: a.url } as CloneReaction)
+      else if (a.type === 'NODE' && typeof a.destinationId === 'string') {
+        const tr = (a.transition ?? null) as Rec | null
+        const kind = tr ? pick(tr.type, TRANSITIONS) : undefined
+        const easing = tr && tr.easing ? pick((tr.easing as Rec).type, EASINGS) : undefined
+        out.push({
+          ...base,
+          action: a.navigation === 'OVERLAY' ? 'OVERLAY' : a.navigation === 'SWAP' ? 'SWAP_OVERLAY' : 'NAVIGATE',
+          destinationId: a.destinationId,
+          transition: kind ?? 'INSTANT',
+          ...(kind && tr && pick(tr.direction, ['LEFT', 'RIGHT', 'TOP', 'BOTTOM'] as const) ? { direction: tr.direction } : {}),
+          ...(kind && tr && typeof tr.duration === 'number' ? { duration: Math.round((tr.duration as number) * 1000) } : {}),
+          ...(easing ? { easing } : {}),
+        } as CloneReaction)
+      }
+    }
+  }
+  return out
+}
+
+/** This file's reactions in Figma's shape. */
+export function reactionsToFigma(list: CloneReaction[] | undefined): Rec[] {
+  return (list ?? []).map((r) => {
+    const trigger: Rec = { type: r.trigger === 'ON_HOVER' ? 'ON_HOVER' : r.trigger, ...(r.trigger === 'AFTER_TIMEOUT' ? { timeout: (r.timeout ?? 800) / 1000 } : {}) }
+    const action: Rec =
+      r.action === 'BACK'
+        ? { type: 'BACK' }
+        : r.action === 'CLOSE_OVERLAY'
+          ? { type: 'CLOSE' }
+          : r.action === 'URL'
+            ? { type: 'URL', url: r.url }
+            : {
+                type: 'NODE',
+                destinationId: r.destinationId ?? null,
+                navigation: r.action === 'OVERLAY' ? 'OVERLAY' : r.action === 'SWAP_OVERLAY' ? 'SWAP' : 'NAVIGATE',
+                transition:
+                  !r.transition || r.transition === 'INSTANT'
+                    ? null
+                    : { type: r.transition, direction: r.direction ?? 'LEFT', duration: (r.duration ?? 300) / 1000, easing: { type: r.easing ?? 'EASE_OUT' }, matchLayers: false },
+                preserveScrollPosition: false,
+              }
+    return { trigger, actions: [action] }
+  })
+}
+
 function effectsFromFigma(list: unknown): Effect[] {
   if (!Array.isArray(list)) throw new Error('effects must be an array')
   return list.map((raw) => {
@@ -125,8 +196,8 @@ const DIRECT = new Set([
   'name', 'x', 'y', 'opacity', 'visible', 'locked', 'blendMode', 'isMask', 'clipsContent', 'itemSpacing', 'counterAxisSpacing', 'paddingLeft', 'paddingRight',
   'paddingTop', 'paddingBottom', 'primaryAxisAlignItems', 'layoutMode', 'layoutPositioning', 'layoutSizingHorizontal', 'layoutSizingVertical', 'strokeWeight',
   'strokeAlign', 'dashPattern', 'strokeCap', 'pointCount', 'characters', 'fontSize', 'textAlignHorizontal', 'textAlignVertical', 'textDecoration', 'textCase',
-  'constraints', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight', 'description', 'fillStyleId', 'strokeStyleId', 'textStyleId', 'reactions', 'layoutGrids',
-  'constrainProportions', 'arrowStart', 'arrowEnd', 'overflowDirection', 'scrollBehavior', 'overlayPositionType', 'overlayBackground', 'overlayBackgroundInteraction',
+  'constraints', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight', 'description', 'fillStyleId', 'strokeStyleId', 'textStyleId', 'layoutGrids',
+  'constrainProportions', 'arrowStart', 'arrowEnd', 'overflowDirection', 'scrollBehavior', 'overlayPositionType', 'overlayBackgroundInteraction',
 ])
 const NULLABLE = new Set(['minWidth', 'maxWidth', 'minHeight', 'maxHeight'])
 const IGNORED = new Set(['expanded', 'exportSettings', 'strokeMiterLimit', 'strokeJoin', 'relativeTransform', 'paragraphSpacing', 'paragraphIndent', 'listSpacing', 'hangingPunctuation', 'hangingList', 'leadingTrim', 'strokesIncludedInLayout', 'itemReverseZIndex', 'cornerSmoothing', 'effectStyleId', 'gridStyleId', 'targetAspectRatio', 'annotations', 'devStatus', 'guides', 'numberOfFixedChildren', 'counterAxisAlignContent', 'layoutAlign2', 'fontKerning', 'openTypeFeatures', 'hyperlink', 'textTruncation', 'maxLines'])
@@ -189,6 +260,52 @@ export async function runFigmaCodeInline(
     return n
   }
 
+  /**
+   * Edits a script makes to an instance or the layers inside it (text, fills, visibility, …) become overrides, as in
+   * Figma: whatever now differs from the component's own layer is recorded, so syncing the instance keeps it.
+   */
+  function recordOverrides() {
+    for (const n of byId.values()) {
+      const mainId = n.sourceId ?? (n.componentId && !n.sourceId ? n.componentId : undefined)
+      const main = mainId ? byId.get(mainId) : undefined
+      if (!main || main === n) continue
+      const a = n as unknown as Rec
+      const b = main as unknown as Rec
+      const patch: Rec = {}
+      for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) patch[k] = a[k]
+      const keys = overrideKeys(n, patch)
+      if (!keys.length) continue
+      const set = new Set([...(n.overrides ?? []), ...keys])
+      if (set.size !== (n.overrides ?? []).length) n.overrides = [...set]
+    }
+  }
+  // Auto layout runs when a script reads geometry, as in Figma: a frame set to fill its parent reports its real width
+  // once the parent is laid out. Every edit bumps `edits`; a layout root is laid out again only after an edit.
+  let edits = 0
+  const laidOutAt = new Map<string, number>()
+  /** The frame whose layout decides this node's geometry: climb while the parent is an auto-layout frame. */
+  const layoutRoot = (n: SceneNode): SceneNode => {
+    let cur = n
+    for (let guard = 0; guard < 1000; guard++) {
+      const p = cur.parentId ? byId.get(cur.parentId) : undefined
+      if (!p || !isAutoLayout(p)) break
+      cur = p
+    }
+    return cur
+  }
+  function ensureLayout(n: SceneNode) {
+    const root = layoutRoot(n)
+    if (laidOutAt.get(root.id) === edits) return
+    const page = pageOf.get(root.id)
+    if (!page) return
+    const sub = [root, ...descendants(indexOf(page), root.id).map((id) => byId.get(id)!)]
+    // Laid out on its own: the root keeps its place, and its children are placed inside it.
+    const res = runLayout(sub.map((x, i) => (i === 0 ? { ...x, parentId: undefined } : x)), estimateMeasure)
+    for (const { id, patch } of res.patches) Object.assign(byId.get(id)!, patch)
+    laidOutAt.set(root.id, edits)
+  }
+  const GEOMETRY_READS = new Set(['x', 'y', 'width', 'height', 'absoluteBoundingBox', 'absoluteRenderBounds', 'absoluteTransform', 'relativeTransform'])
+
   /** A new id no layer in the file uses yet. */
   function freshId(): string {
     let id = newId()
@@ -196,6 +313,7 @@ export async function runFigmaCodeInline(
     return id
   }
   function add(page: PageModel, n: SceneNode) {
+    edits++
     page.nodes.push(n)
     byId.set(n.id, n)
     pageOf.set(n.id, page)
@@ -203,6 +321,7 @@ export async function runFigmaCodeInline(
     listAt(keyOf(n)).push(n.id)
   }
   function removeNode(n: SceneNode) {
+    edits++
     const page = pageOf.get(n.id)!
     const gone = [n.id, ...descendants(indexOf(page), n.id)]
     unlist(n)
@@ -219,6 +338,7 @@ export async function runFigmaCodeInline(
     return false
   }
   function attach(n: SceneNode, page: PageModel, parentId: string | undefined, index?: number) {
+    edits++
     const from = pageOf.get(n.id)!
     if (parentId && within(parentId, n.id)) throw new Error('Cannot append a node to itself or its own descendant')
     unlist(n)
@@ -388,6 +508,11 @@ export async function runFigmaCodeInline(
     },
     getSharedPluginDataKeys: (n) => (ns: string) => Object.keys(n.sharedPluginData?.[ns] ?? {}),
     setRelaunchData: () => () => {},
+    setReactionsAsync: (n) => async (v: unknown) => {
+      const list = reactionsFromFigma(v)
+      if (list.length) n.reactions = list
+      else delete n.reactions
+    },
     exportAsync: () => async () => {
       throw new Error('exportAsync is not available here — use the get_screenshot / download_assets / export_image tools instead')
     },
@@ -460,6 +585,9 @@ export async function runFigmaCodeInline(
     innerRadius: (n) => n.starInnerRadius ?? 0.382,
     booleanOperation: (n) => n.booleanOp,
     vectorPaths: (n) => [{ windingRule: n.vectorFillRule === 'evenodd' ? 'EVENODD' : 'NONZERO', data: n.vectorPath ?? '' }],
+    reactions: (n) => reactionsToFigma(n.reactions),
+    overlayBackground: (n) =>
+      !n.overlayBackground || n.overlayBackground.type === 'NONE' ? { type: 'NONE' } : { type: 'SOLID_COLOR', color: { ...toRgb(n.overlayBackground.color), a: n.overlayBackground.opacity ?? 1 } },
     mainComponent: (n) => (n.componentId && byId.has(n.componentId) ? wrap(byId.get(n.componentId)!) : null),
     key: (n) => n.id,
     absoluteBoundingBox: (n) => {
@@ -477,6 +605,18 @@ export async function runFigmaCodeInline(
   }
 
   const setters: Record<string, (n: SceneNode, v: never) => void> = {
+    reactions: (n, v: unknown) => {
+      const list = reactionsFromFigma(v)
+      if (list.length) n.reactions = list
+      else delete n.reactions
+    },
+    overlayBackground: (n, v: Rec | null) => {
+      if (!v || v.type !== 'SOLID_COLOR') n.overlayBackground = { type: 'NONE' }
+      else {
+        const c = (v.color ?? {}) as Rec
+        n.overlayBackground = typeof c === 'string' ? { type: 'SOLID_COLOR', color: c } : { type: 'SOLID_COLOR', color: toHex(c as { r: number; g: number; b: number }), opacity: typeof c.a === 'number' ? c.a : 1 }
+      }
+    },
     rotation: (n, v: number) => void (v ? (n.rotation = -v) : delete n.rotation),
     fills: (n, v) => void (n.fills = paintsFromFigma(v)),
     strokes: (n, v) => {
@@ -497,7 +637,7 @@ export async function runFigmaCodeInline(
     },
     letterSpacing: (n, v: { value: number; unit?: string } | number) => void (n.letterSpacing = typeof v === 'number' ? v : v.unit === 'PERCENT' ? ((n.fontSize ?? 12) * v.value) / 100 : v.value),
     textAutoResize: (n, v: string) => void (n.textAutoResize = v === 'TRUNCATE' ? 'NONE' : (v as 'NONE')),
-    counterAxisAlignItems: (n, v: string) => void (n.counterAxisAlignItems = v === 'BASELINE' ? 'MIN' : (v as 'MIN')),
+    counterAxisAlignItems: (n, v: string) => void (n.counterAxisAlignItems = v as 'MIN'),
     layoutWrap: (n, v: string) => void (v === 'WRAP' ? (n.layoutWrap = true) : delete n.layoutWrap),
     layoutGrow: (n, v: number) => {
       flags.set(n.id, { ...flags.get(n.id), grow: v > 0 })
@@ -554,13 +694,18 @@ export async function runFigmaCodeInline(
           if (key === 'removed') return !byId.has(id)
           if (key === 'then') return undefined
           const cur = live()
-          if (Object.hasOwn(methods, key)) return methods[key](cur)
+          if (GEOMETRY_READS.has(key)) ensureLayout(cur)
+          if (Object.hasOwn(methods, key)) {
+            edits++
+            return methods[key](cur)
+          }
           if (Object.hasOwn(getters, key)) return getters[key](cur)
           if (DIRECT.has(key)) return (cur as unknown as Rec)[key] ?? (key === 'visible' ? true : key === 'opacity' ? 1 : key === 'locked' || key === 'isMask' ? false : NULLABLE.has(key) ? null : (cur as unknown as Rec)[key])
           return undefined
         },
         set(_t, key, value) {
           if (typeof key === 'symbol') return true
+          edits++
           const cur = live()
           if (key === 'width' || key === 'height') throw new Error(`"${key}" is read-only — use node.resize(width, height)`)
           if (Object.hasOwn(setters, key)) setters[key](cur, value as never)
@@ -617,6 +762,19 @@ export async function runFigmaCodeInline(
       },
       set selection(v: unknown[]) {
         selection = { pageId: p.pageId, ids: v.map((x) => unwrap(x).id) }
+      },
+      get flowStartingPoints() {
+        return all()
+          .filter((n) => n.flowStart)
+          .map((n) => ({ nodeId: n.id, name: n.flowStart }))
+      },
+      set flowStartingPoints(v: { nodeId: string; name?: string }[]) {
+        edits++
+        for (const n of all()) if (n.flowStart) delete n.flowStart
+        ;(v ?? []).forEach((f, i) => {
+          const n = byId.get(f.nodeId)
+          if (n && pageOf.get(n.id) === p) n.flowStart = f.name || `Flow ${i + 1}`
+        })
       },
       appendChild: (child: unknown) => attach(unwrap(child), p, undefined),
       insertChild: (index: number, child: unknown) => attach(unwrap(child), p, undefined, index),
@@ -940,6 +1098,7 @@ export async function runFigmaCodeInline(
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...params: string[]) => (...args: unknown[]) => Promise<unknown>
   const result = await new AsyncFunction('figma', 'console', code)(figma, con)
 
+  recordOverrides()
   for (const p of pages) compact(p)
   return { result: plain(result, 0), logs, warnings: [...warnings], selection, currentPageId: current.pageId }
 }
@@ -964,6 +1123,7 @@ Supported:
 - Text: characters, fontSize, fontName {family, style}, lineHeight, letterSpacing, textAlignHorizontal/Vertical, textAutoResize, textDecoration, textCase,
   setRangeFontSize / setRangeFontName / setRangeFills / setRangeTextDecoration / setRangeLetterSpacing. loadFontAsync is accepted (fonts load on demand).
 - Vectors: vectorPaths = [{windingRule, data}] (SVG path data in the node's width × height box — call resize first).
+- Prototyping: await node.setReactionsAsync(reactions) / node.reactions in Figma's shape (NODE actions NAVIGATE or OVERLAY, BACK, CLOSE, URL; transitions DISSOLVE, SMART_ANIMATE, MOVE_IN, PUSH, SLIDE_IN), page.flowStartingPoints, and on frames overflowDirection, scrollBehavior ('FIXED'), overlayPositionType, overlayBackground, overlayBackgroundInteraction (settable here, unlike in Figma).
 - Components: instance.mainComponent, detachInstance(), swapComponent(component); edits to instance layers become overrides.
 - Styles: figma.createPaintStyle() / createTextStyle() / createEffectStyle(), getLocalPaintStylesAsync() / getLocalTextStylesAsync() / getLocalEffectStylesAsync(), style.remove(), node.fillStyleId / textStyleId / setEffectStyleIdAsync (effect styles are copied onto the layer, not saved as shared styles).
 - Plugin data: node / style getPluginData / setPluginData / getSharedPluginData / setSharedPluginData are saved with the file.
