@@ -687,26 +687,36 @@ export function registerParity(d: ParityDeps) {
       const styles: StyleModel[] = styleRows.map((s) => ({ id: s._id, kind: s.kind, name: s.name, value: structuredClone(s.value) }))
       const run = await runFigmaCode(code, pages, pageId ?? pageRows[0]._id, styles, file.name)
 
-      // Styles first, so nodes can point at their real ids.
+      // Styles first, so nodes can point at their real ids. What comes back from the sandbox is the script's output:
+      // only styles of this file that were loaded before the run may be changed or removed, and only as their own kind.
+      const loaded = new Map(styleRows.map((r) => [r._id, r.kind]))
       const styleIds = new Map<string, string>()
       for (const s of styles) {
         if (s.kind === 'EFFECT') continue
-        if (s.removed) {
-          if (!s.isNew) await convex.mutation(api.styles.remove, { styleId: s.id })
-        } else if (s.isNew) styleIds.set(s.id, (await convex.mutation(api.styles.create, { fileId: fileKey, kind: s.kind, name: s.name, value: s.value })) as string)
+        if (s.kind !== 'PAINT' && s.kind !== 'TEXT') continue
+        const own = loaded.get(s.id) === s.kind
+        if (s.isNew) {
+          if (!s.removed && !loaded.has(s.id)) styleIds.set(s.id, (await convex.mutation(api.styles.create, { fileId: fileKey, kind: s.kind, name: s.name, value: s.value })) as string)
+        } else if (!own) continue
+        else if (s.removed) await convex.mutation(api.styles.remove, { styleId: s.id })
         else if (s.dirty) await convex.mutation(api.styles.update, { styleId: s.id, name: s.name, value: s.value })
       }
       const pageIds = new Map<string, string>()
       for (const p of pages) {
         if (p.isNew) pageIds.set(p.pageId, (await convex.mutation(api.pages.create, { fileId: fileKey, name: p.name })) as string)
-        else if (p.name !== pageRows.find((r) => r._id === p.pageId)!.name) await convex.mutation(api.pages.update, { pageId: p.pageId, name: p.name })
+        else {
+          const row = pageRows.find((r) => r._id === p.pageId)
+          // A page the file did not have before the run (and the script did not create) is ignored.
+          if (!row) continue
+          if (p.name !== row.name) await convex.mutation(api.pages.update, { pageId: p.pageId, name: p.name })
+        }
         if (styleIds.size)
           for (const n of p.nodes)
             for (const k of ['fillStyleId', 'strokeStyleId', 'textStyleId'] as const) if (n[k] && styleIds.has(n[k]!)) n[k] = styleIds.get(n[k]!)
       }
       const real = (id: string) => pageIds.get(id) ?? id
       const emptyIx = buildIndex([])
-      const plan = pages.map((p) => ({ pageId: real(p.pageId), ops: diffOps(before.get(p.pageId) ?? [], p.nodes) }))
+      const plan = pages.filter((p) => p.isNew || before.has(p.pageId)).map((p) => ({ pageId: real(p.pageId), ops: diffOps(before.get(p.pageId) ?? [], p.nodes) }))
       const counts = { created: 0, updated: 0, deleted: 0 }
       // Deletions go first so a node moved to another page is not removed after it was re-created there.
       for (const phase of ['delete', 'rest'] as const)
