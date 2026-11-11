@@ -200,6 +200,9 @@ export interface SceneNode {
   strokeStyleId?: string
   textStyleId?: string
   effectStyleId?: string
+  // Data a script stored on the layer (Plugin API getPluginData / getSharedPluginData). Never copied to instances.
+  pluginData?: Record<string, string>
+  sharedPluginData?: Record<string, Record<string, string>>
 }
 
 export type Op =

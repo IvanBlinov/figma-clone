@@ -78,6 +78,7 @@ export default defineSchema({
     data: v.any(),
   })
     .index('by_page', ['pageId'])
+    .index('by_page_nid', ['pageId', 'nid'])
     .index('by_file_nid', ['fileId', 'nid']),
   presence: defineTable({
     fileId: v.id('files'),

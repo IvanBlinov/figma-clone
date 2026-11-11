@@ -38,6 +38,7 @@ import { LayersPanel } from './LayersPanel'
 import { buildCommands, Palette } from './Palette'
 import { PropertiesPanel } from './PropertiesPanel'
 import { PrototypePanel } from './PrototypePanel'
+import { applyOpsToSlices, usePageNodes } from '../usePageNodes'
 import { installShortcuts } from './shortcuts'
 import { bindRemote, clearHistory, patchState, resetEditor, S, select, setRaw, setTool, useEditor } from './store'
 import { useStyles, type StyleDoc } from './stylesStore'
@@ -76,16 +77,13 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
   const open = file ? { fileId } : 'skip'
   const pages = useQuery(api.pages.list, open)
   const [pageId, setPageId] = useState<Id<'pages'> | null>(null)
-  const nodes = useQuery(api.nodes.list, file && pageId ? { pageId } : 'skip') as SceneNode[] | undefined
+  const nodes = usePageNodes(file ? pageId : null)
   const presence = useQuery(api.presence.list, open)
   const comments = useQuery(api.comments.list, open)
   const command = useQuery(api.commands.latest, open)
   const readOnly = file?.role === 'viewer'
 
-  const applyOps = useMutation(api.nodes.applyOps).withOptimisticUpdate((store, args) => {
-    const cur = store.getQuery(api.nodes.list, { pageId: args.pageId })
-    if (cur) store.setQuery(api.nodes.list, { pageId: args.pageId }, applyOpsToList(cur as SceneNode[], args.ops as Op[]))
-  })
+  const applyOps = useMutation(api.nodes.applyOps).withOptimisticUpdate((store, args) => applyOpsToSlices(store as never, args.pageId, args.ops as Op[]))
   const renameFile = useMutation(api.files.rename)
   const setThumbnail = useMutation(api.files.setThumbnail)
   const createPage = useMutation(api.pages.create)

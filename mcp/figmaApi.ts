@@ -2,7 +2,7 @@
 // Used by the use_figma tool: scripts written for Figma's plugin API run against in-memory copies of the
 // file's pages; the caller diffs the result and stores it.
 // This module must stay free of Node APIs: it is bundled and executed inside the QuickJS sandbox (see sandbox.ts).
-import { buildIndex, descendants, kids, worldMatrix, type DocIndex } from '../shared/doc'
+import { descendants, kids, worldMatrix, type DocIndex } from '../shared/doc'
 import { boundsOf, corners } from '../shared/geometry'
 import { svgToNodes } from '../shared/svgParse'
 import { styleRange } from '../shared/text'
@@ -16,11 +16,14 @@ export interface PageModel {
 }
 export interface StyleModel {
   id: string
-  kind: 'PAINT' | 'TEXT'
+  /** EFFECT styles live only for the run: they are applied to layers but not saved as shared styles. */
+  kind: 'PAINT' | 'TEXT' | 'EFFECT'
   name: string
-  value: { paints?: Paint[]; text?: Record<string, unknown> }
+  value: { paints?: Paint[]; text?: Record<string, unknown>; effects?: Effect[]; pluginData?: Record<string, string> }
   isNew?: boolean
   dirty?: boolean
+  /** Removed by the script: deleted when the run is saved. */
+  removed?: boolean
 }
 export interface RunResult {
   result: unknown
@@ -148,9 +151,34 @@ export async function runFigmaCodeInline(
       byId.set(n.id, n)
       pageOf.set(n.id, p)
     }
-  const childrenOf = (page: PageModel, parentId: string | undefined): SceneNode[] =>
-    page.nodes.filter((n) => (n.parentId ?? undefined) === parentId || (!parentId && n.parentId && !byId.has(n.parentId))).sort((a, b) => a.order - b.order || (a.id < b.id ? -1 : 1))
-  const indexOf = (page: PageModel): DocIndex => buildIndex(page.nodes)
+  // Children of every layer (and of each page, under rootKey), kept up to date as the script edits the tree, so
+  // appending or looking up children never rescans the page: a generator making thousands of layers stays linear.
+  const kidIds = new Map<string, string[]>()
+  const rootKey = (page: PageModel) => `\u0000page:${page.pageId}`
+  const keyOf = (n: SceneNode) => (n.parentId && byId.has(n.parentId) ? n.parentId : rootKey(pageOf.get(n.id)!))
+  const listAt = (key: string) => {
+    let l = kidIds.get(key)
+    if (!l) kidIds.set(key, (l = []))
+    return l
+  }
+  for (const p of pages) for (const n of p.nodes) listAt(keyOf(n)).push(n.id)
+  for (const l of kidIds.values()) l.sort((a, b) => byId.get(a)!.order - byId.get(b)!.order || (a < b ? -1 : 1))
+  const unlist = (n: SceneNode) => {
+    const l = kidIds.get(keyOf(n))
+    const i = l ? l.indexOf(n.id) : -1
+    if (i >= 0) l!.splice(i, 1)
+  }
+  /** Layers removed by the script, dropped from page.nodes in one pass instead of one scan per removal. */
+  const removedIds = new Set<string>()
+  const compact = (page: PageModel) => {
+    if (removedIds.size) page.nodes = page.nodes.filter((x) => !removedIds.has(x.id))
+  }
+  const childrenOf = (page: PageModel, parentId: string | undefined): SceneNode[] => (kidIds.get(parentId ?? rootKey(page)) ?? []).map((id) => byId.get(id)!)
+  /** A live index of one page over the kept child lists (only `get` is used by the tree helpers). */
+  const indexOf = (page: PageModel): DocIndex => ({
+    byId,
+    children: { get: (k: string) => kidIds.get(k === '' ? rootKey(page) : k) } as unknown as DocIndex['children'],
+  })
 
   const wrappers = new Map<string, object>()
   const pageWrappers = new Map<string, object>()
@@ -161,36 +189,53 @@ export async function runFigmaCodeInline(
     return n
   }
 
+  /** A new id no layer in the file uses yet. */
+  function freshId(): string {
+    let id = newId()
+    while (byId.has(id)) id = newId()
+    return id
+  }
   function add(page: PageModel, n: SceneNode) {
     page.nodes.push(n)
     byId.set(n.id, n)
     pageOf.set(n.id, page)
+    removedIds.delete(n.id)
+    listAt(keyOf(n)).push(n.id)
   }
   function removeNode(n: SceneNode) {
     const page = pageOf.get(n.id)!
-    const gone = new Set([n.id, ...descendants(indexOf(page), n.id)])
-    page.nodes = page.nodes.filter((x) => !gone.has(x.id))
+    const gone = [n.id, ...descendants(indexOf(page), n.id)]
+    unlist(n)
     for (const id of gone) {
+      kidIds.delete(id)
       byId.delete(id)
       pageOf.delete(id)
+      removedIds.add(id)
     }
+  }
+  /** True if `id` is `of` or lies inside it, found by walking up from `id`. */
+  const within = (id: string, of: string) => {
+    for (let cur: string | undefined = id, guard = 0; cur && guard < 10000; cur = byId.get(cur)?.parentId, guard++) if (cur === of) return true
+    return false
   }
   function attach(n: SceneNode, page: PageModel, parentId: string | undefined, index?: number) {
     const from = pageOf.get(n.id)!
-    if (parentId && (parentId === n.id || descendants(indexOf(from), n.id).includes(parentId))) throw new Error('Cannot append a node to itself or its own descendant')
+    if (parentId && within(parentId, n.id)) throw new Error('Cannot append a node to itself or its own descendant')
+    unlist(n)
     if (from !== page) {
+      compact(from)
       const ids = new Set([n.id, ...descendants(indexOf(from), n.id)])
       const moving = from.nodes.filter((x) => ids.has(x.id))
       from.nodes = from.nodes.filter((x) => !ids.has(x.id))
       page.nodes.push(...moving)
       for (const m of moving) pageOf.set(m.id, page)
     }
-    const siblings = childrenOf(page, parentId).filter((s) => s.id !== n.id)
     if (parentId) n.parentId = parentId
     else delete n.parentId
+    const siblings = listAt(keyOf(n))
     const at = index === undefined ? siblings.length : Math.max(0, Math.min(index, siblings.length))
-    siblings.splice(at, 0, n)
-    siblings.forEach((s, i) => (s.order = i))
+    siblings.splice(at, 0, n.id)
+    siblings.forEach((id, i) => (byId.get(id)!.order = i))
     applyChildFlags(n)
   }
   /** layoutGrow / layoutAlign depend on the parent's direction, so they are resolved once the node has a parent. */
@@ -214,7 +259,7 @@ export async function runFigmaCodeInline(
   const flags = new Map<string, { grow?: boolean; stretch?: boolean }>()
 
   function create(type: NodeType, props: Partial<SceneNode> = {}): SceneNode {
-    const n = { id: newId(), order: 0, type, name: props.name ?? type[0] + type.slice(1).toLowerCase(), x: 0, y: 0, width: 100, height: 100, ...defaultsFor(type), ...props } as SceneNode
+    const n = { id: freshId(), order: 0, type, name: props.name ?? type[0] + type.slice(1).toLowerCase(), x: 0, y: 0, width: 100, height: 100, ...defaultsFor(type), ...props } as SceneNode
     add(current, n)
     attach(n, current, undefined)
     return n
@@ -223,7 +268,7 @@ export async function runFigmaCodeInline(
     const page = pageOf.get(src.id)!
     const ix = indexOf(page)
     const ids = [src.id, ...descendants(ix, src.id)]
-    const map = new Map(ids.map((id) => [id, newId()]))
+    const map = new Map(ids.map((id) => [id, freshId()]))
     let root!: SceneNode
     for (const id of ids) {
       const o = byId.get(id)!
@@ -262,7 +307,7 @@ export async function runFigmaCodeInline(
     const minY = Math.min(...boxes.map((b) => b.y)) - pw[5]
     const maxX = Math.max(...boxes.map((b) => b.x + b.w)) - pw[4]
     const maxY = Math.max(...boxes.map((b) => b.y + b.h)) - pw[5]
-    const g = { id: newId(), order: 0, type, name: props.name ?? 'Group', x: minX, y: minY, width: maxX - minX, height: maxY - minY, ...props } as SceneNode
+    const g = { id: freshId(), order: 0, type, name: props.name ?? 'Group', x: minX, y: minY, width: maxX - minX, height: maxY - minY, ...props } as SceneNode
     add(page, g)
     attach(g, page, parentId)
     list.forEach((n, i) => {
@@ -318,11 +363,30 @@ export async function runFigmaCodeInline(
     setFillStyleIdAsync: (n) => async (id: string) => void (n.fillStyleId = id || undefined),
     setStrokeStyleIdAsync: (n) => async (id: string) => void (n.strokeStyleId = id || undefined),
     setTextStyleIdAsync: (n) => async (id: string) => void (n.textStyleId = id || undefined),
-    setEffectStyleIdAsync: () => async () => warn('Effect styles are not supported'),
-    getPluginData: () => () => '',
-    setPluginData: () => () => {},
-    getSharedPluginData: () => () => '',
-    setSharedPluginData: () => () => {},
+    // An effect style's shadows and blurs are copied onto the layer (effect styles are not saved as shared styles).
+    setEffectStyleIdAsync: (n) => async (id: string) => {
+      const st = styles.find((x) => x.id === id && x.kind === 'EFFECT' && !x.removed)
+      if (st) n.effects = structuredClone(st.value.effects ?? [])
+    },
+    // Plugin data is stored on the layer, so a generator can find and replace what it made on its next run.
+    getPluginData: (n) => (k: string) => n.pluginData?.[k] ?? '',
+    setPluginData: (n) => (k: string, v: string) => {
+      const next = { ...n.pluginData }
+      if (v === '' || v == null) delete next[k]
+      else next[k] = String(v)
+      n.pluginData = Object.keys(next).length ? next : undefined
+    },
+    getPluginDataKeys: (n) => () => Object.keys(n.pluginData ?? {}),
+    getSharedPluginData: (n) => (ns: string, k: string) => n.sharedPluginData?.[ns]?.[k] ?? '',
+    setSharedPluginData: (n) => (ns: string, k: string, v: string) => {
+      const space = { ...n.sharedPluginData?.[ns] }
+      if (v === '' || v == null) delete space[k]
+      else space[k] = String(v)
+      const all = { ...n.sharedPluginData, [ns]: space }
+      if (!Object.keys(space).length) delete all[ns]
+      n.sharedPluginData = Object.keys(all).length ? all : undefined
+    },
+    getSharedPluginDataKeys: (n) => (ns: string) => Object.keys(n.sharedPluginData?.[ns] ?? {}),
     setRelaunchData: () => () => {},
     exportAsync: () => async () => {
       throw new Error('exportAsync is not available here — use the get_screenshot / download_assets / export_image tools instead')
@@ -568,6 +632,8 @@ export async function runFigmaCodeInline(
     return w
   }
 
+  /** What a style keeps when its value is replaced. */
+  const meta = (s: StyleModel) => (s.value.pluginData ? { pluginData: s.value.pluginData } : {})
   const styleObj = (s: StyleModel) => ({
     get id() {
       return s.id
@@ -587,36 +653,70 @@ export async function runFigmaCodeInline(
       return paintsToFigma(s.value.paints)
     },
     set paints(v: unknown) {
-      s.value = { paints: paintsFromFigma(v) }
+      s.value = { ...meta(s), paints: paintsFromFigma(v) }
       s.dirty = true
     },
     get fontSize() {
       return s.value.text?.fontSize
     },
     set fontSize(v: unknown) {
-      s.value = { text: { ...s.value.text, fontSize: v } }
+      s.value = { ...meta(s), text: { ...s.value.text, fontSize: v } }
       s.dirty = true
     },
     get fontName() {
       return { family: s.value.text?.fontFamily ?? 'Inter', style: WEIGHT_NAMES[(s.value.text?.fontWeight as number) ?? 400] }
     },
     set fontName(v: unknown) {
-      s.value = { text: { ...s.value.text, ...fontFromName(v) } }
+      s.value = { ...meta(s), text: { ...s.value.text, ...fontFromName(v) } }
       s.dirty = true
     },
     set lineHeight(v: { value?: number; unit?: string }) {
-      s.value = { text: { ...s.value.text, lineHeight: v?.unit === 'AUTO' ? undefined : v?.value } }
+      s.value = { ...meta(s), text: { ...s.value.text, lineHeight: v?.unit === 'AUTO' ? undefined : v?.value } }
       s.dirty = true
     },
     set letterSpacing(v: { value: number }) {
-      s.value = { text: { ...s.value.text, letterSpacing: v?.value } }
+      s.value = { ...meta(s), text: { ...s.value.text, letterSpacing: v?.value } }
       s.dirty = true
     },
+    get effects() {
+      return effectsToFigma(s.value.effects)
+    },
+    set effects(v: unknown) {
+      s.value = { ...meta(s), effects: effectsFromFigma(v) }
+      s.dirty = true
+    },
+    get description() {
+      return ''
+    },
     set description(_v: string) {},
-    remove: () => warn('Removing styles from a script is not supported — use the delete_style tool'),
+    getPluginData: (k: string) => s.value.pluginData?.[k] ?? '',
+    setPluginData: (k: string, v: string) => {
+      s.value = { ...s.value, pluginData: { ...s.value.pluginData, [k]: String(v) } }
+      s.dirty = true
+    },
+    getPluginDataKeys: () => Object.keys(s.value.pluginData ?? {}),
+    getSharedPluginData: (ns: string, k: string) => s.value.pluginData?.[`${ns}:${k}`] ?? '',
+    setSharedPluginData: (ns: string, k: string, v: string) => {
+      s.value = { ...s.value, pluginData: { ...s.value.pluginData, [`${ns}:${k}`]: String(v) } }
+      s.dirty = true
+    },
+    get removed() {
+      return !!s.removed
+    },
+    remove: () => {
+      s.removed = true
+    },
   })
-  const newStyle = (kind: 'PAINT' | 'TEXT') => {
-    const s: StyleModel = { id: `new-style:${newId()}`, kind, name: kind === 'PAINT' ? 'Color style' : 'Text style', value: kind === 'PAINT' ? { paints: [] } : { text: {} }, isNew: true }
+  const live = () => styles.filter((x) => !x.removed)
+  const newStyle = (kind: 'PAINT' | 'TEXT' | 'EFFECT') => {
+    if (kind === 'EFFECT') warn('Effect styles are applied to layers but not saved as shared styles in this file')
+    const s: StyleModel = {
+      id: `new-style:${freshId()}`,
+      kind,
+      name: kind === 'PAINT' ? 'Color style' : kind === 'TEXT' ? 'Text style' : 'Effect style',
+      value: kind === 'PAINT' ? { paints: [] } : kind === 'TEXT' ? { text: {} } : { effects: [] },
+      isNew: true,
+    }
     styles.push(s)
     return styleObj(s)
   }
@@ -667,7 +767,7 @@ export async function runFigmaCodeInline(
       current = p
     },
     createPage: () => {
-      const p: PageModel = { pageId: `new-page:${newId()}`, name: `Page ${pages.length + 1}`, nodes: [], isNew: true }
+      const p: PageModel = { pageId: `new-page:${freshId()}`, name: `Page ${pages.length + 1}`, nodes: [], isNew: true }
       pages.push(p)
       return wrapPage(p)
     },
@@ -743,23 +843,24 @@ export async function runFigmaCodeInline(
     createImage: unsupported('figma.createImage', 'Use await figma.createImageAsync(url) or the upload_assets tool.'),
     createImageAsync: async (url: string) => ({ hash: url, getSizeAsync: async () => ({ width: 0, height: 0 }) }),
     getImageByHash: (hash: string) => ({ hash }),
-    getLocalPaintStyles: () => styles.filter((s) => s.kind === 'PAINT').map(styleObj),
-    getLocalPaintStylesAsync: async () => styles.filter((s) => s.kind === 'PAINT').map(styleObj),
-    getLocalTextStyles: () => styles.filter((s) => s.kind === 'TEXT').map(styleObj),
-    getLocalTextStylesAsync: async () => styles.filter((s) => s.kind === 'TEXT').map(styleObj),
-    getLocalEffectStylesAsync: async () => [],
+    getLocalPaintStyles: () => live().filter((s) => s.kind === 'PAINT').map(styleObj),
+    getLocalPaintStylesAsync: async () => live().filter((s) => s.kind === 'PAINT').map(styleObj),
+    getLocalTextStyles: () => live().filter((s) => s.kind === 'TEXT').map(styleObj),
+    getLocalTextStylesAsync: async () => live().filter((s) => s.kind === 'TEXT').map(styleObj),
+    getLocalEffectStyles: () => live().filter((s) => s.kind === 'EFFECT').map(styleObj),
+    getLocalEffectStylesAsync: async () => live().filter((s) => s.kind === 'EFFECT').map(styleObj),
     getLocalGridStylesAsync: async () => [],
     getStyleById: (id: string) => {
-      const s = styles.find((x) => x.id === id)
+      const s = live().find((x) => x.id === id)
       return s ? styleObj(s) : null
     },
     getStyleByIdAsync: async (id: string) => {
-      const s = styles.find((x) => x.id === id)
+      const s = live().find((x) => x.id === id)
       return s ? styleObj(s) : null
     },
     createPaintStyle: () => newStyle('PAINT'),
     createTextStyle: () => newStyle('TEXT'),
-    createEffectStyle: unsupported('Effect styles', 'Set effects directly on nodes.'),
+    createEffectStyle: () => newStyle('EFFECT'),
     variables: new Proxy({}, { get: () => unsupported('The variables API', 'Use color / text styles (figma.createPaintStyle, figma.createTextStyle) instead.') }),
     importComponentByKeyAsync: async (key: string) => {
       const n = byId.get(key)
@@ -839,6 +940,7 @@ export async function runFigmaCodeInline(
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...params: string[]) => (...args: unknown[]) => Promise<unknown>
   const result = await new AsyncFunction('figma', 'console', code)(figma, con)
 
+  for (const p of pages) compact(p)
   return { result: plain(result, 0), logs, warnings: [...warnings], selection, currentPageId: current.pageId }
 }
 
@@ -863,10 +965,11 @@ Supported:
   setRangeFontSize / setRangeFontName / setRangeFills / setRangeTextDecoration / setRangeLetterSpacing. loadFontAsync is accepted (fonts load on demand).
 - Vectors: vectorPaths = [{windingRule, data}] (SVG path data in the node's width × height box — call resize first).
 - Components: instance.mainComponent, detachInstance(), swapComponent(component); edits to instance layers become overrides.
-- Styles: figma.createPaintStyle() / createTextStyle(), getLocalPaintStylesAsync() / getLocalTextStylesAsync(), node.fillStyleId / textStyleId.
+- Styles: figma.createPaintStyle() / createTextStyle() / createEffectStyle(), getLocalPaintStylesAsync() / getLocalTextStylesAsync() / getLocalEffectStylesAsync(), style.remove(), node.fillStyleId / textStyleId / setEffectStyleIdAsync (effect styles are copied onto the layer, not saved as shared styles).
+- Plugin data: node / style getPluginData / setPluginData / getSharedPluginData / setSharedPluginData are saved with the file.
 
 - Sections: figma.createSection() (type 'SECTION'); video fills: {type:'VIDEO', url, posterUrl?} in fills.
-- Limits: the script has 15 seconds and 128 MB, and no network, timers that wait, or Node / browser globals; setTimeout callbacks run immediately.
+- Limits: the script has 90 seconds and 256 MB, and no network, timers that wait, or Node / browser globals; setTimeout callbacks run immediately.
 
 Not supported (throws or is ignored with a warning): variables, effect/grid styles, exportAsync (use get_screenshot / download_assets),
 plugin data, flatten, FigJam / Slides nodes, and any property not listed above.`

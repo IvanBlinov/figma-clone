@@ -10,6 +10,7 @@ import type { PrototypeDevice, Reaction, SceneNode } from '../shared/types'
 import { ensureFont, measureText, onFontsChanged } from './editor/fonts'
 import { hitPath } from './editor/hit'
 import { drawNodes, setImageLoadCallback, toggleVideo, videosPlayingSince } from './editor/render'
+import { usePageNodes } from './usePageNodes'
 import { frameView, overlayOrigin, scrollBy, type FrameView, type Scroll } from './playerView'
 
 interface Doc {
@@ -118,7 +119,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
   const file = useQuery(api.files.get, { fileId })
   const pages = useQuery(api.pages.list, file ? { fileId } : 'skip')
   const page = pages?.find((p) => p._id === pageId) ?? pages?.[0]
-  const stored = useQuery(api.nodes.list, page ? { pageId: page._id } : 'skip') as SceneNode[] | undefined
+  const stored = usePageNodes(page?._id)
   const device = (page as { prototypeDevice?: PrototypeDevice } | undefined)?.prototypeDevice ?? null
   const [tick, setTick] = useState(0)
   const canvasRef = useRef<HTMLCanvasElement>(null)

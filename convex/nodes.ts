@@ -14,6 +14,19 @@ export const list = query({
   },
 })
 
+/** One slice of a page's layers by id (see shared/shards.ts): large pages are read slice by slice. */
+export const listRange = query({
+  args: { pageId: v.id('pages'), from: v.string(), to: v.string(), ...tokenArg },
+  handler: async (ctx, { pageId, from, to, token }) => {
+    await pageAccess(ctx, pageId, token, 'view')
+    const rows = await ctx.db
+      .query('nodes')
+      .withIndex('by_page_nid', (q) => q.eq('pageId', pageId).gte('nid', from).lt('nid', to))
+      .collect()
+    return rows.map((r) => r.data)
+  },
+})
+
 export const get = query({
   args: { fileId: v.id('files'), ids: v.array(v.string()), ...tokenArg },
   handler: async (ctx, { fileId, ids, token }) => {

@@ -6,8 +6,9 @@ import { randomBytes } from 'node:crypto'
 import type { PageModel, RunResult, StyleModel } from './figmaApi'
 import { SANDBOX_SOURCE } from './sandbox.generated'
 
-const TIME_LIMIT_MS = 15_000
-const MEMORY_LIMIT = 128 * 1024 * 1024
+/** Long enough for a generator that builds a whole design system in one run (a few thousand layers). */
+const TIME_LIMIT_MS = 90_000
+const MEMORY_LIMIT = 256 * 1024 * 1024
 const MAX_DOCUMENT_BYTES = 24 * 1024 * 1024
 
 /**
@@ -28,7 +29,7 @@ export async function runFigmaCode(code: string, pages: PageModel[], currentPage
     handle.dispose()
     const message = typeof e === 'string' ? e : (e?.message ?? 'Script failed')
     if (/interrupted/i.test(message)) throw new Error(`Script timed out after ${TIME_LIMIT_MS / 1000}s`)
-    if (/out of memory/i.test(message)) throw new Error('Script ran out of memory (128 MB)')
+    if (/out of memory/i.test(message)) throw new Error('Script ran out of memory (256 MB)')
     throw new Error(typeof e === 'object' && e?.name && e.name !== 'Error' ? `${e.name}: ${message}` : message)
   }
   try {

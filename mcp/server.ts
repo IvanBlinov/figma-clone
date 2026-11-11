@@ -37,6 +37,7 @@ import { runLayout } from '../shared/layout'
 import { resolveOps } from '../shared/resolve'
 import { exportSvg } from '../shared/svg'
 import { estimateMeasure } from '../shared/text'
+import { NODE_SHARDS } from '../shared/shards'
 import { defaultsFor, newId, typeLabel, type NodeType, type Op, type Paint, type PrototypeDevice, type SceneNode } from '../shared/types'
 
 // ---------- config ----------
@@ -98,6 +99,12 @@ interface PageCtx {
   ix: DocIndex
 }
 
+/** Every layer of a page, read slice by slice (a single query can't read a large page in time). */
+export async function listNodes(pageId: string): Promise<SceneNode[]> {
+  const parts = await Promise.all(NODE_SHARDS.map((s) => convex.query(api.nodes.listRange, { pageId, from: s.from, to: s.to }) as Promise<SceneNode[]>))
+  return parts.flat()
+}
+
 async function resolvePage(fileId: string, pageId?: string): Promise<string> {
   if (pageId) return pageId
   const pages = (await convex.query(api.pages.list, { fileId })) as { _id: string }[]
@@ -107,7 +114,7 @@ async function resolvePage(fileId: string, pageId?: string): Promise<string> {
 
 async function loadPage(fileId: string, pageId?: string): Promise<PageCtx> {
   const pid = await resolvePage(fileId, pageId)
-  const stored = (await convex.query(api.nodes.list, { pageId: pid })) as SceneNode[]
+  const stored = await listNodes(pid)
   const { nodes, index } = runLayout(stored, estimateMeasure)
   return { fileId, pageId: pid, nodes, ix: index }
 }
@@ -136,11 +143,34 @@ async function pageOfNodes(fileId: string, ids: string[]): Promise<PageCtx> {
 }
 
 /** Apply ops, fold in derived layout (auto layout, hug, text size, group bounds) and announce agent presence. */
+const BATCH_OPS = 400
+const BATCH_BYTES = 2 * 1024 * 1024
+
+/** Split ops into batches small enough for one mutation, keeping their order (parents are created before children). */
+export function opBatches(ops: Op[]): Op[][] {
+  const out: Op[][] = []
+  let cur: Op[] = []
+  let bytes = 0
+  for (const o of ops) {
+    const size = JSON.stringify(o).length
+    if (cur.length && (cur.length >= BATCH_OPS || bytes + size > BATCH_BYTES)) {
+      out.push(cur)
+      cur = []
+      bytes = 0
+    }
+    cur.push(o)
+    bytes += size
+  }
+  if (cur.length) out.push(cur)
+  return out
+}
+
 async function write(ctx: PageCtx, ops: Op[], touched: string[] = []): Promise<DocIndex> {
-  const stored = (await convex.query(api.nodes.list, { pageId: ctx.pageId })) as SceneNode[]
+  const stored = await listNodes(ctx.pageId)
   // Fold in everything the edit implies: auto layout, constraints, instance sync, override bookkeeping.
   const resolved = resolveOps(stored, ops, estimateMeasure)
-  await convex.mutation(api.nodes.applyOps, { fileId: ctx.fileId, pageId: ctx.pageId, ops: resolved.ops })
+  // Large edits (a generator building a whole page) go in batches: one mutation may only write so much.
+  for (const batch of opBatches(resolved.ops)) await convex.mutation(api.nodes.applyOps, { fileId: ctx.fileId, pageId: ctx.pageId, ops: batch })
   const layout = { index: buildIndex(resolved.nodes) }
   const live = touched.filter((id) => layout.index.byId.has(id))
   try {
@@ -1298,6 +1328,7 @@ registerParity({
   pageOfNodes,
   pageOrNodes,
   write,
+  listNodes,
   ok,
   fileUrl,
   nodeGuide: NODE_GUIDE,
