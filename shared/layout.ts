@@ -31,6 +31,11 @@ export function runLayout(input: SceneNode[], measure: MeasureFn): LayoutResult 
   return { nodes, index, patches }
 }
 
+/** Size a text layer to its content as its auto-resize mode says (no-op for NONE). */
+export function autosizeText(n: SceneNode, measure: MeasureFn) {
+  sizeText(n, measure)
+}
+
 function sizeText(n: SceneNode, measure: MeasureFn, forcedW?: number) {
   const mode = n.textAutoResize ?? 'WIDTH_AND_HEIGHT'
   if (forcedW != null) {

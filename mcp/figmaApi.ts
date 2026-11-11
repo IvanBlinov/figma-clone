@@ -7,7 +7,7 @@ import { boundsOf, corners } from '../shared/geometry'
 import { svgToNodes } from '../shared/svgParse'
 import { overrideKeys } from '../shared/resolve'
 import { estimateMeasure, styleRange } from '../shared/text'
-import { runLayout } from '../shared/layout'
+import { autosizeText, runLayout } from '../shared/layout'
 import { defaultsFor, isAutoLayout, newId, type Effect, type NodeType, type Paint, type SceneNode, type TextRunStyle } from '../shared/types'
 
 export interface PageModel {
@@ -272,7 +272,9 @@ export async function runFigmaCodeInline(
       const a = n as unknown as Rec
       const b = main as unknown as Rec
       const patch: Rec = {}
-      for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) patch[k] = a[k]
+      // Only what the layer itself sets counts. A key it lacks is inherited, even when the component gained it after
+      // the copy was made (a script adding prototype links to a component once its instances exist).
+      for (const k of Object.keys(a)) if (a[k] !== undefined && JSON.stringify(a[k]) !== JSON.stringify(b[k])) patch[k] = a[k]
       const keys = overrideKeys(n, patch)
       if (!keys.length) continue
       const set = new Set([...(n.overrides ?? []), ...keys])
@@ -304,6 +306,7 @@ export async function runFigmaCodeInline(
     for (const { id, patch } of res.patches) Object.assign(byId.get(id)!, patch)
     laidOutAt.set(root.id, edits)
   }
+  const TEXT_SIZING = new Set(['characters', 'fontSize', 'fontName', 'fontWeight', 'lineHeight', 'letterSpacing', 'textCase', 'textAutoResize', 'textStyleId'])
   const GEOMETRY_READS = new Set(['x', 'y', 'width', 'height', 'absoluteBoundingBox', 'absoluteRenderBounds', 'absoluteTransform', 'relativeTransform'])
 
   /** A new id no layer in the file uses yet. */
@@ -697,7 +700,15 @@ export async function runFigmaCodeInline(
           if (GEOMETRY_READS.has(key)) ensureLayout(cur)
           if (Object.hasOwn(methods, key)) {
             edits++
-            return methods[key](cur)
+            const m = methods[key](cur)
+            // Range styling changes a text's size too, as in Figma.
+            if (cur.type === 'TEXT' && key.startsWith('setRange') && typeof m === 'function')
+              return (...args: unknown[]) => {
+                const out = (m as (...a: unknown[]) => unknown)(...args)
+                autosizeText(live(), estimateMeasure)
+                return out
+              }
+            return m
           }
           if (Object.hasOwn(getters, key)) return getters[key](cur)
           if (DIRECT.has(key)) return (cur as unknown as Rec)[key] ?? (key === 'visible' ? true : key === 'opacity' ? 1 : key === 'locked' || key === 'isMask' ? false : NULLABLE.has(key) ? null : (cur as unknown as Rec)[key])
@@ -714,6 +725,8 @@ export async function runFigmaCodeInline(
             else (cur as unknown as Rec)[key] = value
             if (key === 'characters' && cur.type === 'TEXT' && (cur.name === 'Text' || !cur.name)) cur.name = String(value).split('\n')[0].slice(0, 40) || 'Text'
           } else if (!IGNORED.has(key)) warn(`Property "${key}" is not supported and was ignored`)
+          // A text layer grows or wraps to its content as soon as the content or font changes, as in Figma.
+          if (cur.type === 'TEXT' && TEXT_SIZING.has(key)) autosizeText(cur, estimateMeasure)
           return true
         },
         has: (_t, key) => typeof key === 'string' && (Object.hasOwn(methods, key) || Object.hasOwn(getters, key) || DIRECT.has(key)),
