@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { extname } from 'node:path'
-import { inlineImages, missingNote, svgToPng } from './renderPng'
+import { imageSize, inlineImages, missingNote, svgToPng } from './renderPng'
 import { z } from 'zod'
 import { isBoolean } from '../shared/boolean'
 import { cssOf } from '../shared/css'
@@ -61,31 +61,10 @@ function metadataXml(ix: DocIndex, id: string, depth = 0): string {
 async function render(ix: DocIndex, ids: string[], maxDimension = 1024, background?: string) {
   const probe = exportSvg(ix, ids, { measure: estimateMeasure })
   const scale = Math.min(4, maxDimension / Math.max(probe.width, probe.height, 1))
-  const { images, missing, total } = await inlineImages(ix, ids)
+  const { images, missing, total } = await inlineImages(ix, ids, scale)
   const { svg, width, height } = exportSvg(ix, ids, { measure: estimateMeasure, scale, background, images })
   const note = missingNote(missing, total)
   return { png: svgToPng(svg).toString('base64'), width: Math.round(width), height: Math.round(height), original_width: Math.round(probe.width), original_height: Math.round(probe.height), ...(total ? { images_drawn: total - missing.length, images_total: total } : {}), ...(note ? { warning: note } : {}) }
-}
-
-function imageSize(buf: Buffer): { w: number; h: number } | null {
-  if (buf.length > 24 && buf.readUInt32BE(0) === 0x89504e47) return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) }
-  if (buf.length > 10 && buf.toString('ascii', 0, 3) === 'GIF') return { w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) }
-  if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
-    let i = 2
-    while (i + 9 < buf.length) {
-      if (buf[i] !== 0xff) break
-      const marker = buf[i + 1]
-      const len = buf.readUInt16BE(i + 2)
-      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return { w: buf.readUInt16BE(i + 7), h: buf.readUInt16BE(i + 5) }
-      i += 2 + len
-    }
-  }
-  if (buf.length > 30 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
-    const kind = buf.toString('ascii', 12, 16)
-    if (kind === 'VP8X') return { w: 1 + buf.readUIntLE(24, 3), h: 1 + buf.readUIntLE(27, 3) }
-    if (kind === 'VP8 ') return { w: buf.readUInt16LE(26) & 0x3fff, h: buf.readUInt16LE(28) & 0x3fff }
-  }
-  return null
 }
 
 const MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime' }
