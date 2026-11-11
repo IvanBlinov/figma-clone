@@ -86,7 +86,7 @@ export function applyConstraints(before: SceneNode[], after: SceneNode[], explic
 
 // ---------- components ----------
 /** Never copied from the component to its instances. */
-const NEVER = new Set(['id', 'parentId', 'sourceId', 'overrides', 'isComponent', 'isComponentSet', 'description', 'flowStart'])
+const NEVER = new Set(['id', 'parentId', 'sourceId', 'overrides', 'isComponent', 'isComponentSet', 'description', 'flowStart', 'pluginData', 'sharedPluginData'])
 /** Owned by the instance root itself (its placement in the document). */
 const ROOT_OWN = new Set([
   'x',
@@ -102,6 +102,7 @@ const ROOT_OWN = new Set([
   'layoutSizingVertical',
   'componentId',
   'reactions',
+  'scrollBehavior',
   'type',
 ])
 const same = (a: unknown, b: unknown) => a === b || (typeof a === 'object' && typeof b === 'object' && JSON.stringify(a) === JSON.stringify(b))

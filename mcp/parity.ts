@@ -34,6 +34,7 @@ export interface ParityDeps {
   pageOfNodes: (fileId: string, ids: string[]) => Promise<PageCtx>
   pageOrNodes: (fileId: string, ids: string[]) => Promise<{ ctx: PageCtx; ids: string[]; wholePage: boolean }>
   write: (ctx: PageCtx, ops: Op[], touched?: string[]) => Promise<DocIndex>
+  listNodes: (pageId: string) => Promise<SceneNode[]>
   ok: (data: unknown) => { content: { type: 'text'; text: string }[] }
   fileUrl: (fileId: string) => string
   nodeGuide: string
@@ -670,7 +671,7 @@ export function registerParity(d: ParityDeps) {
   tool(
     'use_figma',
     `Run JavaScript against a file through a Figma Plugin API compatible \`figma\` global — the general-purpose way to create, edit or inspect designs with code written for Figma (figma.createFrame(), node.fills = [...], frame.layoutMode = 'VERTICAL', await figma.loadFontAsync(...)). The code runs as an async function body; return a value to get it back. Changes are saved only if the script finishes without throwing. Read the supported API subset first: get_figma_skill with uri "skill://figma/figma-use/SKILL.md". For simple edits the dedicated tools (create_nodes, update_nodes, …) are more direct.`,
-    { fileKey, code: z.string().max(50000).describe('JavaScript to execute; has access to the `figma` global'), description: z.string().describe('What the code is meant to do'), pageId: z.string().optional().describe('Page that figma.currentPage starts on; defaults to the first page'), sessionId },
+    { fileKey, code: z.string().max(1_000_000).describe('JavaScript to execute (up to 1 MB, so whole generator plugins fit); has access to the `figma` global'), description: z.string().describe('What the code is meant to do'), pageId: z.string().optional().describe('Page that figma.currentPage starts on; defaults to the first page'), sessionId },
     async ({ fileKey, code, pageId }) => {
       const file = await convex.query(api.files.get, { fileId: fileKey })
       const pageRows = (await convex.query(api.pages.list, { fileId: fileKey })) as { _id: string; name: string }[]
@@ -678,7 +679,7 @@ export function registerParity(d: ParityDeps) {
       const before = new Map<string, SceneNode[]>()
       const pages: PageModel[] = []
       for (const p of pageRows) {
-        const nodes = (await convex.query(api.nodes.list, { pageId: p._id })) as SceneNode[]
+        const nodes = await d.listNodes(p._id)
         before.set(p._id, nodes)
         pages.push({ pageId: p._id, name: p.name, nodes: structuredClone(nodes) })
       }
@@ -689,7 +690,10 @@ export function registerParity(d: ParityDeps) {
       // Styles first, so nodes can point at their real ids.
       const styleIds = new Map<string, string>()
       for (const s of styles) {
-        if (s.isNew) styleIds.set(s.id, (await convex.mutation(api.styles.create, { fileId: fileKey, kind: s.kind, name: s.name, value: s.value })) as string)
+        if (s.kind === 'EFFECT') continue
+        if (s.removed) {
+          if (!s.isNew) await convex.mutation(api.styles.remove, { styleId: s.id })
+        } else if (s.isNew) styleIds.set(s.id, (await convex.mutation(api.styles.create, { fileId: fileKey, kind: s.kind, name: s.name, value: s.value })) as string)
         else if (s.dirty) await convex.mutation(api.styles.update, { styleId: s.id, name: s.name, value: s.value })
       }
       const pageIds = new Map<string, string>()

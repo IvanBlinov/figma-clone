@@ -66,6 +66,8 @@ export default defineSchema({
     name: v.string(),
     order: v.number(),
     background: v.optional(v.string()),
+    /** Screen size prototypes of this page are presented at; frames larger than it scroll. */
+    prototypeDevice: v.optional(v.object({ name: v.optional(v.string()), width: v.number(), height: v.number() })),
   }).index('by_file', ['fileId']),
   // One row per scene node. `data` is the full node JSON (see shared/types.ts);
   // `nid` is the client-generated node id so undo/redo can restore identity.
@@ -76,6 +78,7 @@ export default defineSchema({
     data: v.any(),
   })
     .index('by_page', ['pageId'])
+    .index('by_page_nid', ['pageId', 'nid'])
     .index('by_file_nid', ['fileId', 'nid']),
   presence: defineTable({
     fileId: v.id('files'),
@@ -117,7 +120,7 @@ export default defineSchema({
     author: v.optional(v.string()),
     createdAt: v.number(),
     nodeCount: v.number(),
-    pages: v.array(v.object({ pageId: v.string(), name: v.string(), order: v.number(), background: v.optional(v.string()) })),
+    pages: v.array(v.object({ pageId: v.string(), name: v.string(), order: v.number(), background: v.optional(v.string()), prototypeDevice: v.optional(v.object({ name: v.optional(v.string()), width: v.number(), height: v.number() })) })),
   }).index('by_file', ['fileId']),
   versionNodes: defineTable({
     versionId: v.id('versions'),

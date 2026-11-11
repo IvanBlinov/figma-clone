@@ -4,39 +4,66 @@ import { ChevronLeft, ChevronRight, Maximize, RotateCcw, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
-import { buildIndex, computeWorld, descendants, screenFrames, type DocIndex } from '../shared/doc'
-import type { Mat } from '../shared/geometry'
+import { buildIndex, descendants, screenFrames, type DocIndex } from '../shared/doc'
 import { runLayout } from '../shared/layout'
-import type { Reaction, SceneNode } from '../shared/types'
+import type { PrototypeDevice, Reaction, SceneNode } from '../shared/types'
 import { ensureFont, measureText, onFontsChanged } from './editor/fonts'
 import { hitPath } from './editor/hit'
 import { drawNodes, setImageLoadCallback, toggleVideo, videosPlayingSince } from './editor/render'
+import { usePageNodes } from './usePageNodes'
+import { frameView, overlayOrigin, scrollBy, type FrameView, type Scroll } from './playerView'
 
 interface Doc {
   ix: DocIndex
-  world: Map<string, Mat>
   frames: string[]
 }
 interface Anim {
   from: string
   to: string
+  fromScroll: Scroll
   transition: NonNullable<Reaction['transition']>
   direction: NonNullable<Reaction['direction']>
   easing: NonNullable<Reaction['easing']>
   duration: number
   t0: number
 }
+interface Screen {
+  id: string
+  via?: Reaction
+  scroll: Scroll
+}
+interface Overlay extends Screen {
+  t0: number
+  hover?: string
+}
 interface State {
-  stack: { id: string; via?: Reaction }[]
-  overlays: { id: string; t0: number; hover?: string }[]
+  stack: Screen[]
+  overlays: Overlay[]
   anim: Anim | null
   hover: string | null
   flash: number
+}
+/** Where a frame is drawn: its view, the screen position of its top-left corner and the scale. */
+interface Placed {
+  v: FrameView
+  x: number
+  y: number
+  s: number
+}
+interface Drag {
+  x: number
+  y: number
+  moved: boolean
+  path: string[] | null
+  layer: 'screen' | 'overlay'
 }
 
 const ease = (t: number, e: string) => (e === 'LINEAR' ? t : e === 'EASE_IN' ? t * t : e === 'EASE_IN_OUT' ? t * t * (3 - 2 * t) : 1 - (1 - t) * (1 - t))
 const OPPOSITE = { LEFT: 'RIGHT', RIGHT: 'LEFT', TOP: 'BOTTOM', BOTTOM: 'TOP' } as const
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t
+/** A press that moves further than this (px) scrolls instead of clicking. */
+const DRAG_SLOP = 6
+const BAR = 48
 
 function mixColor(a: string, b: string, t: number): string {
   const p = (h: string, i: number) => parseInt(h.slice(1 + i * 2, 3 + i * 2), 16)
@@ -44,8 +71,8 @@ function mixColor(a: string, b: string, t: number): string {
 }
 
 /** Destination frame with layers that also exist (by name) in the source frame interpolated from their old state. */
-function smartIndex(ix: DocIndex, fromId: string, toId: string, t: number): DocIndex {
-  const key = (root: string, id: string) => {
+function smartIndex(src: DocIndex, fromId: string, dst: DocIndex, toId: string, t: number): DocIndex {
+  const key = (ix: DocIndex, root: string, id: string) => {
     const parts: string[] = []
     let cur = ix.byId.get(id)
     while (cur && cur.id !== root) {
@@ -54,16 +81,16 @@ function smartIndex(ix: DocIndex, fromId: string, toId: string, t: number): DocI
     }
     return parts.join('/')
   }
-  const src = new Map<string, SceneNode>()
-  for (const id of descendants(ix, fromId)) {
-    const k = key(fromId, id)
-    if (!src.has(k)) src.set(k, ix.byId.get(id)!)
+  const before = new Map<string, SceneNode>()
+  for (const id of descendants(src, fromId)) {
+    const k = key(src, fromId, id)
+    if (!before.has(k)) before.set(k, src.byId.get(id)!)
   }
-  const to = ix.byId.get(toId)!
+  const to = dst.byId.get(toId)!
   const out: SceneNode[] = [to]
-  for (const id of descendants(ix, toId)) {
-    const b = ix.byId.get(id)!
-    const a = src.get(key(toId, id))
+  for (const id of descendants(dst, toId)) {
+    const b = dst.byId.get(id)!
+    const a = before.get(key(dst, toId, id))
     if (!a) {
       out.push({ ...b, opacity: (b.opacity ?? 1) * t })
       continue
@@ -92,12 +119,15 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
   const file = useQuery(api.files.get, { fileId })
   const pages = useQuery(api.pages.list, file ? { fileId } : 'skip')
   const page = pages?.find((p) => p._id === pageId) ?? pages?.[0]
-  const stored = useQuery(api.nodes.list, page ? { pageId: page._id } : 'skip') as SceneNode[] | undefined
+  const stored = usePageNodes(page?._id)
+  const device = (page as { prototypeDevice?: PrototypeDevice } | undefined)?.prototypeDevice ?? null
   const [tick, setTick] = useState(0)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const state = useRef<State>({ stack: [], overlays: [], anim: null, hover: null, flash: 0 })
   const [current, setCurrent] = useState<string | null>(null)
   const redraw = useRef<() => void>(() => {})
+  const drag = useRef<Drag | null>(null)
+  const swallowClick = useRef(false)
 
   useEffect(() => {
     const bump = () => setTick((t) => t + 1)
@@ -116,11 +146,24 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     const res = runLayout(stored, measureText)
     // Screens are the top-level frames; sections only group them.
     const frames = screenFrames(res.index).filter((id) => res.index.byId.get(id)!.visible !== false)
-    return { ix: res.index, world: computeWorld(res.index), frames }
+    return { ix: res.index, frames }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stored, tick])
   const docRef = useRef(doc)
   docRef.current = doc
+  const deviceRef = useRef(device)
+  deviceRef.current = device
+
+  // Views are rebuilt only when the document, the device or a frame's scroll offsets change.
+  const views = useRef(new Map<string, { doc: Doc; device: PrototypeDevice | null; scroll: Scroll; v: FrameView }>())
+  const viewOf = (id: string, scroll: Scroll): FrameView => {
+    const d = docRef.current!
+    const hit = views.current.get(id)
+    if (hit && hit.doc === d && hit.device === deviceRef.current && hit.scroll === scroll) return hit.v
+    const v = frameView(d.ix, id, deviceRef.current, scroll)
+    views.current.set(id, { doc: d, device: deviceRef.current, scroll, v })
+    return v
+  }
 
   const startId = useMemo(() => {
     if (!doc) return null
@@ -133,7 +176,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     const st = state.current
     const cur = st.stack[st.stack.length - 1]?.id
     if (startId && (!cur || !docRef.current?.ix.byId.has(cur))) {
-      st.stack = [{ id: startId }]
+      st.stack = [{ id: startId, scroll: {} }]
       st.overlays = []
       st.anim = null
       setCurrent(startId)
@@ -141,40 +184,64 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     redraw.current()
   }, [startId, doc])
 
+  useEffect(() => redraw.current(), [device])
+
   useEffect(() => {
     document.title = file ? `${file.name} – Prototype` : 'Prototype'
   }, [file?.name])
 
   // ---------- geometry ----------
-  const layoutOf = (id: string) => {
-    const d = docRef.current!
-    const f = d.ix.byId.get(id)!
+  const topScreen = () => state.current.stack[state.current.stack.length - 1] ?? null
+  const top = () => topScreen()?.id ?? null
+  const topOverlay = () => state.current.overlays[state.current.overlays.length - 1] ?? null
+
+  /** The current screen, scaled down (never up) to fit the window above the bar and centred. */
+  const stage = (): Placed => {
+    const cur = topScreen()!
+    const v = viewOf(cur.id, cur.scroll)
     const vw = window.innerWidth
-    const vh = window.innerHeight - 48
-    const base = d.ix.byId.get(state.current.stack[state.current.stack.length - 1]?.id ?? id) ?? f
-    const s = Math.min(1, vw / base.width, vh / base.height)
-    // Where the frame sits on the page (it may be inside a section) and the transform of what contains it.
-    const m = d.world.get(id)
-    const pm = f.parentId ? d.world.get(f.parentId) : undefined
-    return { f, s, x: (vw - f.width * s) / 2, y: (vh - f.height * s) / 2, wx: m ? m[4] : f.x, wy: m ? m[5] : f.y, pm }
+    const vh = window.innerHeight - BAR
+    const s = Math.min(1, vw / v.width, vh / v.height)
+    return { v, s, x: (vw - v.width * s) / 2, y: (vh - v.height * s) / 2 }
+  }
+  /** Another screen (the one a transition leaves), fitted and centred on its own, as it was shown. */
+  const placeScreen = (id: string, scroll: Scroll): Placed => {
+    const v = viewOf(id, scroll)
+    const vw = window.innerWidth
+    const vh = window.innerHeight - BAR
+    const s = Math.min(1, vw / v.width, vh / v.height)
+    return { v, s, x: (vw - v.width * s) / 2, y: (vh - v.height * s) / 2 }
+  }
+  /** An overlay at its overlay position on the current screen. */
+  const placeOverlay = (o: Overlay): Placed => {
+    const st = stage()
+    const v = viewOf(o.id, o.scroll)
+    const f = docRef.current!.ix.byId.get(o.id)!
+    const at = overlayOrigin(f.overlayPositionType, { x: st.x, y: st.y, w: st.v.width * st.s, h: st.v.height * st.s }, v.width * st.s, v.height * st.s)
+    return { v, s: st.s, ...at }
   }
 
   // ---------- actions ----------
-  const top = () => state.current.stack[state.current.stack.length - 1]?.id ?? null
-
   const go = (to: string, r?: Reaction, back = false) => {
     const st = state.current
     const d = docRef.current
-    const from = top()
+    const from = topScreen()
     if (!d || !from || !d.ix.byId.has(to) || st.anim) return
+    const hadOverlay = st.overlays.length > 0
     st.overlays = []
+    if (from.id === to && !back) {
+      // Navigating to the screen already shown (a tab bar on its own tab, a sheet's Done) only closes overlays.
+      if (hadOverlay) redraw.current()
+      return
+    }
     const transition = r?.transition ?? 'INSTANT'
     if (back) st.stack.pop()
-    else st.stack.push({ id: to, via: r })
-    if (transition !== 'INSTANT' && from !== to)
+    else st.stack.push({ id: to, via: r, scroll: {} })
+    if (transition !== 'INSTANT')
       st.anim = {
-        from,
+        from: from.id,
         to,
+        fromScroll: from.scroll,
         transition,
         direction: back ? OPPOSITE[r?.direction ?? 'LEFT'] : (r?.direction ?? 'LEFT'),
         easing: r?.easing ?? 'EASE_OUT',
@@ -195,7 +262,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
         break
       case 'OVERLAY':
         if (r.destinationId && d.ix.byId.has(r.destinationId) && !st.overlays.some((o) => o.id === r.destinationId)) {
-          st.overlays.push({ id: r.destinationId, t0: performance.now(), hover: r.trigger === 'ON_HOVER' ? sourceId : undefined })
+          st.overlays.push({ id: r.destinationId, via: r, scroll: {}, t0: performance.now(), hover: r.trigger === 'ON_HOVER' ? sourceId : undefined })
           redraw.current()
         }
         break
@@ -228,52 +295,70 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
   const restart = () => {
     const st = state.current
     if (!startId) return
-    st.stack = [{ id: startId }]
+    st.stack = [{ id: startId, scroll: {} }]
     st.overlays = []
     st.anim = null
     setCurrent(startId)
     redraw.current()
   }
 
-  /** Nodes under a screen point inside a frame, deepest first, ending with the frame itself. */
-  const pathAt = (frame: string, cx: number, cy: number): string[] | null => {
-    const d = docRef.current!
-    const l = layoutOf(frame)
-    const lx = (cx - l.x) / l.s
-    const ly = (cy - l.y) / l.s
-    if (lx < 0 || ly < 0 || lx > l.f.width || ly > l.f.height) return null
-    const p = { x: l.wx + lx, y: l.wy + ly }
-    const path = hitPath({ doc: d.ix, world: d.world, viewport: { x: 0, y: 0, zoom: l.s } }, p, undefined, frame)
-    return [...path.reverse(), frame]
+  /** Nodes under a screen point inside a placed frame, deepest first, ending with the frame itself; null when outside it. */
+  const pathIn = (p: Placed, cx: number, cy: number): string[] | null => {
+    const lx = (cx - p.x) / p.s
+    const ly = (cy - p.y) / p.s
+    if (lx < 0 || ly < 0 || lx > p.v.width || ly > p.v.height) return null
+    const path = hitPath({ doc: p.v.ix, world: p.v.world, viewport: { x: 0, y: 0, zoom: p.s } }, { x: lx, y: ly }, undefined, p.v.id)
+    return [...path.reverse(), p.v.id]
+  }
+  /** What is under the pointer: the top overlay if there is one, else the screen. */
+  const pointed = (cx: number, cy: number): { placed: Placed; path: string[] | null; layer: 'screen' | 'overlay' } | null => {
+    if (!docRef.current || !topScreen()) return null
+    const over = topOverlay()
+    if (over && docRef.current.ix.byId.has(over.id)) {
+      const placed = placeOverlay(over)
+      return { placed, path: pathIn(placed, cx, cy), layer: 'overlay' }
+    }
+    const placed = stage()
+    return { placed, path: pathIn(placed, cx, cy), layer: 'screen' }
   }
   const reactionAt = (cx: number, cy: number, triggers: Reaction['trigger'][]): { r: Reaction; id: string } | 'outside' | null => {
-    const st = state.current
-    const d = docRef.current
-    const cur = top()
-    if (!d || !cur) return null
-    const over = st.overlays[st.overlays.length - 1]
-    const path = pathAt(over?.id ?? cur, cx, cy)
-    if (!path) return over ? 'outside' : null
-    for (const id of path) {
-      const r = d.ix.byId.get(id)?.reactions?.find((x) => triggers.includes(x.trigger))
+    const hit = pointed(cx, cy)
+    if (!hit) return null
+    if (!hit.path) return hit.layer === 'overlay' ? 'outside' : null
+    for (const id of hit.path) {
+      const r = hit.placed.v.ix.byId.get(id)?.reactions?.find((x) => triggers.includes(x.trigger))
       if (r) return { r, id }
     }
     return null
   }
   /** The video under the pointer that a click would start or pause: the topmost layer with a video fill, unless a layer above it reacts to clicks. */
   const videoAt = (cx: number, cy: number): string | null => {
-    const st = state.current
-    const d = docRef.current
-    const cur = top()
-    if (!d || !cur) return null
-    for (const id of pathAt(st.overlays[st.overlays.length - 1]?.id ?? cur, cx, cy) ?? []) {
-      const n = d.ix.byId.get(id)
+    const hit = pointed(cx, cy)
+    for (const id of hit?.path ?? []) {
+      const n = hit!.placed.v.ix.byId.get(id)
       if (n?.reactions?.some((x) => x.trigger === 'ON_CLICK' || x.trigger === 'ON_PRESS')) return null
       const fill = (n?.fills ?? []).find((p) => p.type === 'VIDEO' && p.visible !== false && p.url)
       if (fill && fill.type === 'VIDEO') return fill.url
     }
     return null
   }
+  /** Scroll whatever is under the pointer; returns the frame that moved, or null. */
+  const scrollAt = (layer: 'screen' | 'overlay', path: string[], dx: number, dy: number): string | null => {
+    const st = state.current
+    const owner: Screen | null = layer === 'overlay' ? topOverlay() : topScreen()
+    if (!owner || st.anim) return null
+    const next = scrollBy(viewOf(owner.id, owner.scroll), owner.scroll, path, dx, dy)
+    if (!next) return null
+    const movedId = Object.keys(next).find((k) => next[k] !== owner.scroll[k]) ?? null
+    owner.scroll = next
+    redraw.current()
+    return movedId
+  }
+
+  const slides = (o: Overlay) => o.via?.transition === 'MOVE_IN' || o.via?.transition === 'SLIDE_IN' || o.via?.transition === 'PUSH'
+  const overlayDuration = (o: Overlay) => (slides(o) ? Math.max(1, o.via?.duration ?? 300) : 180)
+  /** True while an overlay is still sliding or fading in: where it is drawn is not yet where it is hit-tested. */
+  const overlayMoving = () => state.current.overlays.some((o) => performance.now() - o.t0 < overlayDuration(o))
 
   // ---------- drawing ----------
   useEffect(() => {
@@ -295,86 +380,114 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
       ctx.setTransform(1, 0, 0, 1, 0, 0)
       ctx.fillStyle = '#1E1E1E'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
-      const cur = top()
-      if (!d || !cur || !d.ix.byId.has(cur)) return
+      const cur = topScreen()
+      if (!d || !cur || !d.ix.byId.has(cur.id)) return
       let again = false
-      const screen = (ix: DocIndex, id: string, alpha: number, ox = 0, oy = 0) => {
-        const l = layoutOf(id)
+      const box = stage()
+      const stageRect = () => ctx.rect(box.x * dpr, box.y * dpr, box.v.width * box.s * dpr, box.v.height * box.s * dpr)
+      const paint = (p: Placed, ix: DocIndex, alpha: number, ox = 0, oy = 0, clip = false) => {
         ctx.save()
         ctx.setTransform(1, 0, 0, 1, 0, 0)
-        ctx.beginPath()
-        // Keep sliding screens inside the stage of the current frame.
-        const stage = layoutOf(cur)
-        ctx.rect(stage.x * dpr, stage.y * dpr, stage.f.width * stage.s * dpr, stage.f.height * stage.s * dpr)
-        if (ox || oy) ctx.clip()
+        // Keep sliding screens, and everything drawn during a transition, inside the stage of the current frame.
+        if (ox || oy || clip) {
+          ctx.beginPath()
+          stageRect()
+          ctx.clip()
+        }
         ctx.globalAlpha = alpha
-        const k = l.s * dpr
-        ctx.setTransform(k, 0, 0, k, (l.x + ox) * dpr - l.wx * k, (l.y + oy) * dpr - l.wy * k)
-        if (l.pm) ctx.transform(l.pm[0], l.pm[1], l.pm[2], l.pm[3], l.pm[4], l.pm[5])
-        drawNodes(ctx, ix, [id], k)
+        const k = p.s * dpr
+        ctx.setTransform(k, 0, 0, k, (p.x + ox) * dpr, (p.y + oy) * dpr)
+        drawNodes(ctx, ix, [p.v.id], k)
         ctx.restore()
       }
       const a = st.anim
       if (a && d.ix.byId.has(a.from) && d.ix.byId.has(a.to)) {
         const raw = Math.min(1, (performance.now() - a.t0) / a.duration)
         const e = ease(raw, a.easing)
-        const l = layoutOf(a.to)
-        const vx = a.direction === 'LEFT' ? l.f.width * l.s : a.direction === 'RIGHT' ? -l.f.width * l.s : 0
-        const vy = a.direction === 'TOP' ? l.f.height * l.s : a.direction === 'BOTTOM' ? -l.f.height * l.s : 0
+        const from = placeScreen(a.from, a.fromScroll)
+        const to = box
+        const w = to.v.width * to.s
+        const h = to.v.height * to.s
+        const vx = a.direction === 'LEFT' ? w : a.direction === 'RIGHT' ? -w : 0
+        const vy = a.direction === 'TOP' ? h : a.direction === 'BOTTOM' ? -h : 0
         switch (a.transition) {
           case 'DISSOLVE':
-            screen(d.ix, a.from, 1)
-            screen(d.ix, a.to, e)
+            paint(from, from.v.ix, 1, 0, 0, true)
+            paint(to, to.v.ix, e)
             break
           case 'MOVE_IN':
-            screen(d.ix, a.from, 1)
-            screen(d.ix, a.to, 1, vx * (1 - e), vy * (1 - e))
+            paint(from, from.v.ix, 1, 0, 0, true)
+            paint(to, to.v.ix, 1, vx * (1 - e), vy * (1 - e))
             break
           case 'PUSH':
-            screen(d.ix, a.from, 1, -vx * e, -vy * e)
-            screen(d.ix, a.to, 1, vx * (1 - e), vy * (1 - e))
+            paint(from, from.v.ix, 1, -vx * e, -vy * e)
+            paint(to, to.v.ix, 1, vx * (1 - e), vy * (1 - e))
             break
           case 'SLIDE_IN':
-            screen(d.ix, a.from, 1 - 0.4 * e, -vx * e * 0.3, -vy * e * 0.3)
-            screen(d.ix, a.to, 1, vx * (1 - e), vy * (1 - e))
+            paint(from, from.v.ix, 1 - 0.4 * e, -vx * e * 0.3, -vy * e * 0.3)
+            paint(to, to.v.ix, 1, vx * (1 - e), vy * (1 - e))
             break
           case 'SMART_ANIMATE':
-            screen(d.ix, a.from, 1)
-            screen(smartIndex(d.ix, a.from, a.to, e), a.to, Math.min(1, e * 3))
+            paint(from, from.v.ix, 1, 0, 0, true)
+            paint(to, smartIndex(from.v.ix, a.from, to.v.ix, a.to, e), Math.min(1, e * 3))
             break
           default:
-            screen(d.ix, a.to, 1)
+            paint(to, to.v.ix, 1)
         }
         if (raw >= 1) st.anim = null
         again = true
       } else {
         st.anim = null
-        screen(d.ix, cur, 1)
+        paint(box, box.v.ix, 1)
       }
       for (const o of st.overlays) {
         if (!d.ix.byId.has(o.id)) continue
-        const t = Math.min(1, (performance.now() - o.t0) / 180)
-        if (t < 1) again = true
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-        const stage = layoutOf(cur)
-        ctx.fillStyle = `rgba(0,0,0,${0.3 * t})`
-        ctx.fillRect(stage.x, stage.y, stage.f.width * stage.s, stage.f.height * stage.s)
-        screen(d.ix, o.id, t)
+        const f = d.ix.byId.get(o.id)!
+        const r = o.via
+        const moves = slides(o)
+        const dur = overlayDuration(o)
+        const raw = Math.min(1, (performance.now() - o.t0) / dur)
+        const t = moves ? ease(raw, r?.easing ?? 'EASE_OUT') : raw
+        if (raw < 1) again = true
+        // What is drawn behind the overlay: a 30 % black scrim unless the frame says otherwise.
+        const bg = f.overlayBackground ?? { type: 'SOLID_COLOR', color: '#000000', opacity: 0.3 }
+        if (bg.type === 'SOLID_COLOR') {
+          ctx.save()
+          ctx.setTransform(1, 0, 0, 1, 0, 0)
+          ctx.globalAlpha = (bg.opacity ?? 1) * Math.min(1, raw * 1.5)
+          ctx.fillStyle = bg.color
+          ctx.beginPath()
+          stageRect()
+          ctx.fill()
+          ctx.restore()
+        }
+        const p = placeOverlay(o)
+        const w = p.v.width * p.s
+        const h = p.v.height * p.s
+        const dir = r?.direction ?? 'TOP'
+        const ox = moves ? (dir === 'LEFT' ? w : dir === 'RIGHT' ? -w : 0) * (1 - t) : 0
+        const oy = moves ? (dir === 'TOP' ? h : dir === 'BOTTOM' ? -h : 0) * (1 - t) : 0
+        paint(p, p.v.ix, moves ? 1 : t, ox, oy)
       }
       // Hotspot hints after a click that hit nothing.
       const flashAge = performance.now() - st.flash
       if (flashAge < 450) {
         again = true
-        const host = st.overlays[st.overlays.length - 1]?.id ?? cur
-        const l = layoutOf(host)
+        const over = topOverlay()
+        const host = over && d.ix.byId.has(over.id) ? placeOverlay(over) : box
+        ctx.save()
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx.beginPath()
+        ctx.rect(host.x, host.y, host.v.width * host.s, host.v.height * host.s)
+        ctx.clip()
         ctx.fillStyle = `rgba(13,153,255,${0.35 * (1 - flashAge / 450)})`
-        for (const id of [host, ...descendants(d.ix, host)]) {
-          const n = d.ix.byId.get(id)!
-          if (id === host || !n.reactions?.some((r) => r.trigger === 'ON_CLICK' || r.trigger === 'ON_PRESS')) continue
-          const m = d.world.get(id)!
-          ctx.fillRect(l.x + (m[4] - l.wx) * l.s, l.y + (m[5] - l.wy) * l.s, n.width * l.s, n.height * l.s)
+        for (const id of descendants(host.v.ix, host.v.id)) {
+          const n = host.v.ix.byId.get(id)!
+          if (!n.reactions?.some((r) => r.trigger === 'ON_CLICK' || r.trigger === 'ON_PRESS')) continue
+          const m = host.v.world.get(id)!
+          ctx.fillRect(host.x + m[4] * host.s, host.y + m[5] * host.s, n.width * host.s, n.height * host.s)
         }
+        ctx.restore()
       }
       // Video fills: keep painting while a video that was just drawn is playing.
       if (videosPlayingSince(t0)) again = true
@@ -385,9 +498,21 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     }
     const onResize = () => redraw.current()
     window.addEventListener('resize', onResize)
+    // Wheel and trackpad scrolling; not passive, so the page itself never scrolls or zooms instead.
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const hit = pointed(e.clientX, e.clientY)
+      if (!hit?.path) return
+      const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? window.innerHeight : 1
+      const dx = (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX) * k
+      const dy = (e.shiftKey && !e.deltaX ? 0 : e.deltaY) * k
+      scrollAt(hit.layer, hit.path, dx / hit.placed.s, dy / hit.placed.s)
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
     redraw.current()
     return () => {
       window.removeEventListener('resize', onResize)
+      canvas.removeEventListener('wheel', onWheel)
       cancelAnimationFrame(raf)
       videosPlayingSince(Infinity) // pause and release every video
     }
@@ -420,13 +545,61 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startId])
 
+  // Dragging (a finger, or the mouse) scrolls; a press that barely moves stays a click.
+  const onPointerDown = (e: React.PointerEvent) => {
+    swallowClick.current = false
+    if (e.button !== 0) return
+    const hit = pointed(e.clientX, e.clientY)
+    drag.current = { x: e.clientX, y: e.clientY, moved: false, path: hit?.path ?? null, layer: hit?.layer ?? 'screen' }
+  }
+  const onPointerMove = (e: React.PointerEvent) => {
+    const g = drag.current
+    if (g && e.buttons & 1) {
+      const dx = e.clientX - g.x
+      const dy = e.clientY - g.y
+      if (!g.moved && Math.hypot(dx, dy) < DRAG_SLOP) return
+      if (!g.moved) {
+        g.moved = true
+        canvasRef.current!.setPointerCapture(e.pointerId)
+      }
+      g.x = e.clientX
+      g.y = e.clientY
+      const s = stage().s
+      // The frame that takes the first movement keeps the gesture, so a carousel reaching its end doesn't hand it to the page.
+      if (g.path) {
+        const movedId = scrollAt(g.layer, g.path, -dx / s, -dy / s)
+        if (movedId && g.path.length > 1) g.path = [movedId]
+      }
+      return
+    }
+    onHover(e)
+  }
+  const onPointerUp = (e: React.PointerEvent) => {
+    const g = drag.current
+    drag.current = null
+    if (!g?.moved) return
+    if (canvasRef.current!.hasPointerCapture(e.pointerId)) canvasRef.current!.releasePointerCapture(e.pointerId)
+    // The click a browser may send after a drag is not a tap. It comes right away if at all, so the flag never outlives it.
+    if (e.type === 'pointerup') {
+      swallowClick.current = true
+      setTimeout(() => (swallowClick.current = false), 0)
+    }
+  }
+
   const onClick = (e: React.MouseEvent) => {
     const st = state.current
-    if (st.anim) return
+    if (swallowClick.current) {
+      swallowClick.current = false
+      return
+    }
+    if (st.anim || overlayMoving()) return
     const video = videoAt(e.clientX, e.clientY)
     if (video) return toggleVideo(video)
     const hit = reactionAt(e.clientX, e.clientY, ['ON_CLICK', 'ON_PRESS'])
     if (hit === 'outside') {
+      const over = topOverlay()
+      const f = over ? docRef.current?.ix.byId.get(over.id) : undefined
+      if (f?.overlayBackgroundInteraction === 'NONE') return
       st.overlays.pop()
       return redraw.current()
     }
@@ -434,7 +607,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     st.flash = performance.now()
     redraw.current()
   }
-  const onMove = (e: React.MouseEvent) => {
+  const onHover = (e: React.PointerEvent) => {
     const st = state.current
     const click = reactionAt(e.clientX, e.clientY, ['ON_CLICK', 'ON_PRESS'])
     canvasRef.current!.style.cursor = (click && click !== 'outside') || videoAt(e.clientX, e.clientY) ? 'pointer' : 'default'
@@ -442,7 +615,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     const id = hov && hov !== 'outside' ? hov.id : null
     if (id === st.hover) return
     // Leaving the layer that opened a hover overlay closes it (unless the pointer moved onto the overlay itself).
-    const overHoverOverlay = st.overlays.some((o) => o.hover && pathAt(o.id, e.clientX, e.clientY))
+    const overHoverOverlay = st.overlays.some((o) => o.hover && pathIn(placeOverlay(o), e.clientX, e.clientY))
     if (st.hover && !overHoverOverlay) {
       const before = st.overlays.length
       st.overlays = st.overlays.filter((o) => o.hover !== st.hover)
@@ -466,7 +639,15 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
   const name = doc && current ? doc.ix.byId.get(current)?.name : ''
   return (
     <div className="player">
-      <canvas ref={canvasRef} onClick={onClick} onMouseMove={onMove} style={{ width: '100%', height: '100%', display: 'block' }} />
+      <canvas
+        ref={canvasRef}
+        onClick={onClick}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        style={{ width: '100%', height: '100%', display: 'block', touchAction: 'none' }}
+      />
       {stored && !doc?.frames.length && <div className="player-empty">This page has no frames to present.</div>}
       <div className="player-bar">
         <a className="player-btn" href={`#/file/${fileId}`} title="Back to the editor">

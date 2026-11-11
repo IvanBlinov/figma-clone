@@ -137,7 +137,7 @@ export const duplicate = mutation({
       .withIndex('by_file', (q) => q.eq('fileId', fileId))
       .collect()
     for (const p of pages) {
-      const pid = await ctx.db.insert('pages', { fileId: newId, name: p.name, order: p.order, background: p.background })
+      const pid = await ctx.db.insert('pages', { fileId: newId, name: p.name, order: p.order, background: p.background, prototypeDevice: p.prototypeDevice })
       const nodes = await ctx.db
         .query('nodes')
         .withIndex('by_page', (q) => q.eq('pageId', p._id))
