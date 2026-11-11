@@ -20,7 +20,7 @@ import { isAutoLayout, type NodeType, type Op, type SceneNode } from '../../shar
 import { serializePath, smoothPath, subsBounds, transformSubs, type SubPath } from '../../shared/vector'
 import { addReaction, backOrder, componentsToInstances, createInstance, makeNode, makeSection, placeMedia, placement, sizeSideEffects, commitDraft, toggleTextStyle, topFrameOf, zoomAt } from './actions'
 import { frameAt, hitPath, parentWorld, pick, pickDeeper, snapBox, worldBoxOf } from './hit'
-import { drawNodes, drawOverlay, frameLabels, protoHandle, RULER, selectionBox, setImageLoadCallback, videosPlayingSince, visibleRootIds, type RemoteUser, type SelectionBox } from './render'
+import { drawNodes, drawOverlay, frameLabels, protoHandle, RULER, selectionBox, setImageLoadCallback, toggleVideo, videosPlayingSince, visibleRootIds, type RemoteUser, type SelectionBox } from './render'
 import { clearDraft, commit, patchState, S, screenToWorld, select, setDraft, setTool, useEditor, type Tool } from './store'
 import {
   applyTextInput,
@@ -916,6 +916,9 @@ export function Canvas({ remotes, onCursor, onCommentAt, onContextMenu }: Props)
     const deeper = pickDeeper(st, p)
     if (st.doc.byId.get(leaf)!.type === 'VECTOR' && (st.selection.includes(leaf) || deeper === leaf)) return enterVectorEdit(leaf)
     if (st.doc.byId.get(leaf)!.type === 'TEXT' && (st.selection.includes(leaf) || deeper === leaf)) return startTextEdit(leaf)
+    // Double-clicking a video layer that is already selected starts or pauses it.
+    const video = st.selection.includes(leaf) ? (st.doc.byId.get(leaf)!.fills ?? []).find((f) => f.type === 'VIDEO' && f.visible !== false && f.url) : undefined
+    if (video && video.type === 'VIDEO') return toggleVideo(video.url)
     if (deeper) select([deeper])
   }
 

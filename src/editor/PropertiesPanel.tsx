@@ -18,6 +18,8 @@ import {
   Link2,
   Minus,
   MoreHorizontal,
+  Pause,
+  Play,
   Plus,
   RotateCw,
   Scan,
@@ -26,7 +28,7 @@ import {
   TextAlignEnd,
   TextAlignStart,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useState, useSyncExternalStore } from 'react'
 import { cssColor, parentOf } from '../../shared/doc'
 import { stylesInRange } from '../../shared/text'
 import { isAutoLayout, nodeLabel, VIDEO_FALLBACK, type BooleanOp, type Effect, type Paint, type SceneNode, type Sizing } from '../../shared/types'
@@ -34,6 +36,7 @@ import { addAutoLayout, alignSelection, booleanOperation, commitDraft, distribut
 import { exportNodes } from './export'
 import { FONTS } from './fonts'
 import { ComponentSection, ConstraintsSection, GridSection, hasTextStyleKey, LocalStyles, StyleButton, StyleChip } from './PanelExtras'
+import { isVideoPlaying, subscribeVideoPlayState, toggleVideo } from './render'
 import { S, useEditor } from './store'
 import { focusProxy } from './textEdit'
 import { ColorPicker, IconBtn, normalizeHex, NumInput, Popover, Section, Select, TextInput, type ChangeMode } from './ui'
@@ -191,8 +194,19 @@ function PaintEditor({ paint, onChange }: { paint: Paint; onChange: (p: Paint, m
   )
 }
 
+/** Videos stay paused until started here (or by double-clicking the layer). */
+function VideoPlayBtn({ url }: { url: string }) {
+  const playing = useSyncExternalStore(subscribeVideoPlayState, () => isVideoPlaying(url))
+  return (
+    <IconBtn title={playing ? 'Pause video' : 'Play video'} onClick={() => toggleVideo(url)}>
+      {playing ? <Pause size={14} /> : <Play size={14} />}
+    </IconBtn>
+  )
+}
+
 function VideoPaintEditor({ paint, onChange }: { paint: Extract<Paint, { type: 'VIDEO' }>; onChange: (p: Paint, mode: ChangeMode) => void }) {
   const [busy, setBusy] = useState(false)
+  const playing = useSyncExternalStore(subscribeVideoPlayState, () => isVideoPlaying(paint.url))
   // A different file starts without a poster: the old one shows another video.
   const setUrl = (url: string, posterUrl?: string) => {
     const { posterUrl: _old, ...rest } = paint
@@ -204,6 +218,11 @@ function VideoPaintEditor({ paint, onChange }: { paint: Extract<Paint, { type: '
         <Film size={18} />
         <span>{busy ? 'Uploading…' : paint.url ? (paint.posterUrl ? '' : 'Poster is captured when the video loads') : 'No video yet'}</span>
       </div>
+      {paint.url && (
+        <button className="link-btn" onClick={() => toggleVideo(paint.url)} title="Videos stay paused until you start them">
+          {playing ? '❚❚ Pause' : '▶ Play'}
+        </button>
+      )}
       <TextInput value={paint.url} placeholder="Video URL (mp4 / webm)" onCommit={(url) => url !== paint.url && setUrl(url.trim())} />
       <div className="row">
         <label className="link-btn">
@@ -288,6 +307,7 @@ function PaintList({ nodes, prop, set, title, defaultColor, extra, header }: { n
                 {paintLabel(p)}
               </span>
             )}
+            {p.type === 'VIDEO' && p.url && <VideoPlayBtn url={p.url} />}
             <NumInput className="w48 bare" value={Math.round((p.opacity ?? 1) * 100)} suffix="%" min={0} max={100} onChange={(v, m) => patchAt({ ...p, opacity: v / 100 }, m)} />
             <IconBtn title="Toggle visibility" onClick={() => patchAt({ ...p, visible: p.visible === false }, 'commit')}>
               {p.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}

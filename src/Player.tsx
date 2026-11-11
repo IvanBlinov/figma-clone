@@ -10,7 +10,7 @@ import { runLayout } from '../shared/layout'
 import type { Reaction, SceneNode } from '../shared/types'
 import { ensureFont, measureText, onFontsChanged } from './editor/fonts'
 import { hitPath } from './editor/hit'
-import { drawNodes, setImageLoadCallback, videosPlayingSince } from './editor/render'
+import { drawNodes, setImageLoadCallback, toggleVideo, videosPlayingSince } from './editor/render'
 
 interface Doc {
   ix: DocIndex
@@ -260,6 +260,20 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     }
     return null
   }
+  /** The video under the pointer that a click would start or pause: the topmost layer with a video fill, unless a layer above it reacts to clicks. */
+  const videoAt = (cx: number, cy: number): string | null => {
+    const st = state.current
+    const d = docRef.current
+    const cur = top()
+    if (!d || !cur) return null
+    for (const id of pathAt(st.overlays[st.overlays.length - 1]?.id ?? cur, cx, cy) ?? []) {
+      const n = d.ix.byId.get(id)
+      if (n?.reactions?.some((x) => x.trigger === 'ON_CLICK' || x.trigger === 'ON_PRESS')) return null
+      const fill = (n?.fills ?? []).find((p) => p.type === 'VIDEO' && p.visible !== false && p.url)
+      if (fill && fill.type === 'VIDEO') return fill.url
+    }
+    return null
+  }
 
   // ---------- drawing ----------
   useEffect(() => {
@@ -409,6 +423,8 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
   const onClick = (e: React.MouseEvent) => {
     const st = state.current
     if (st.anim) return
+    const video = videoAt(e.clientX, e.clientY)
+    if (video) return toggleVideo(video)
     const hit = reactionAt(e.clientX, e.clientY, ['ON_CLICK', 'ON_PRESS'])
     if (hit === 'outside') {
       st.overlays.pop()
@@ -421,7 +437,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
   const onMove = (e: React.MouseEvent) => {
     const st = state.current
     const click = reactionAt(e.clientX, e.clientY, ['ON_CLICK', 'ON_PRESS'])
-    canvasRef.current!.style.cursor = click && click !== 'outside' ? 'pointer' : 'default'
+    canvasRef.current!.style.cursor = (click && click !== 'outside') || videoAt(e.clientX, e.clientY) ? 'pointer' : 'default'
     const hov = reactionAt(e.clientX, e.clientY, ['ON_HOVER'])
     const id = hov && hov !== 'outside' ? hov.id : null
     if (id === st.hover) return

@@ -63,8 +63,10 @@ function getImage(url: string): HTMLImageElement | null {
 }
 
 // ---------- videos ----------
-// One muted, looping <video> per URL, kept off-DOM and painted onto the canvas like an image. Canvases that show
-// videos call `videosPlayingSince` after each paint and schedule another frame while it returns true.
+// One muted, looping <video> per URL, kept off-DOM and painted onto the canvas like an image. A video shows its first
+// frame and stays paused until someone starts it (`toggleVideo`: the Play button of the fill, or a click in the
+// prototype player). Canvases that show videos call `videosPlayingSince` after each paint and schedule another frame
+// while it returns true.
 interface VideoEntry {
   el: HTMLVideoElement
   /** A first frame has been decoded. */
@@ -76,6 +78,24 @@ interface VideoEntry {
 const videos = new Map<string, VideoEntry>()
 const videoReadyListeners = new Set<(url: string, el: HTMLVideoElement) => void>()
 const repaint = () => imageListeners.forEach((fn) => fn())
+
+/** URLs of the videos that were started by hand in this session. Nothing plays unless it is in here. */
+const started = new Set<string>()
+const playStateListeners = new Set<() => void>()
+export const isVideoPlaying = (url: string) => started.has(url)
+/** Start or pause a video (every layer that shows this URL follows). */
+export function toggleVideo(url: string, play = !started.has(url)) {
+  if (!url || play === started.has(url)) return
+  if (play) started.add(url)
+  else started.delete(url)
+  playStateListeners.forEach((fn) => fn())
+  repaint()
+}
+/** For React: be told when a video is started or paused. */
+export function subscribeVideoPlayState(fn: () => void): () => void {
+  playStateListeners.add(fn)
+  return () => void playStateListeners.delete(fn)
+}
 
 /** Called once per video URL when its first frame is available (poster capture). */
 export function onVideoReady(fn: (url: string, el: HTMLVideoElement) => void): () => void {
@@ -98,7 +118,6 @@ function getVideo(url: string, live: boolean): VideoEntry | null {
     el.defaultMuted = true
     el.loop = true
     el.playsInline = true
-    el.autoplay = true
     el.preload = 'auto'
     el.setAttribute('muted', '')
     el.setAttribute('playsinline', '')
@@ -121,7 +140,11 @@ function getVideo(url: string, live: boolean): VideoEntry | null {
   }
   if (live) {
     e.lastDrawn = performance.now()
-    if (!e.error && e.el.paused) void e.el.play().catch(() => {})
+    if (!e.error) {
+      if (started.has(url)) {
+        if (e.el.paused) void e.el.play().catch(() => {})
+      } else if (!e.el.paused) e.el.pause()
+    }
   }
   return e
 }
@@ -132,6 +155,11 @@ function getVideo(url: string, live: boolean): VideoEntry | null {
  */
 export function videosPlayingSince(t0: number): boolean {
   let playing = false
+  // The canvas is going away: the next one starts with every video paused again.
+  if (t0 === Infinity && started.size) {
+    started.clear()
+    playStateListeners.forEach((fn) => fn())
+  }
   for (const [url, e] of videos) {
     if (e.lastDrawn >= t0) {
       if (!e.error && !e.el.paused && !e.el.ended && e.el.readyState >= 2) playing = true
@@ -237,6 +265,24 @@ function drawVideoFill(d: DrawCtx, p: Extract<Paint, { type: 'VIDEO' }>, n: Scen
     }
   }
   if (el) drawScaled(ctx, el, el.videoWidth, el.videoHeight, p.scaleMode, n)
+  // A paused video carries a play badge, so it reads as a video and not as a picture (not in exports).
+  if (d.live && p.url && !started.has(p.url)) {
+    const r = Math.max(4, Math.min(26, Math.min(n.width, n.height) * 0.18))
+    const cx = n.width / 2
+    const cy = n.height / 2
+    ctx.globalAlpha = 1
+    ctx.beginPath()
+    ctx.arc(cx, cy, r, 0, Math.PI * 2)
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)'
+    ctx.fill()
+    ctx.beginPath()
+    ctx.moveTo(cx - r * 0.3, cy - r * 0.45)
+    ctx.lineTo(cx + r * 0.5, cy)
+    ctx.lineTo(cx - r * 0.3, cy + r * 0.45)
+    ctx.closePath()
+    ctx.fillStyle = '#FFFFFF'
+    ctx.fill()
+  }
   ctx.restore()
 }
 
