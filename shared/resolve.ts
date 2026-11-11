@@ -102,6 +102,7 @@ const ROOT_OWN = new Set([
   'layoutSizingVertical',
   'componentId',
   'reactions',
+  'scrollBehavior',
   'type',
 ])
 const same = (a: unknown, b: unknown) => a === b || (typeof a === 'object' && typeof b === 'object' && JSON.stringify(a) === JSON.stringify(b))

@@ -11,7 +11,8 @@
     "build:mcp": "node scripts/build-sandbox.mjs && esbuild mcp/cli.ts --bundle --platform=node --format=esm --packages=external --outfile=mcp/dist/server.mjs",
     "mcp": "node mcp/dist/server.mjs",
     "dev:backend:local": "cross-env CONVEX_AGENT_MODE=anonymous convex dev",
-    "deploy:backend": "convex deploy"
+    "deploy:backend": "convex deploy",
+    "test": "esbuild src/playerView.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/player-view.test.mjs --log-level=warning && node --test node_modules/.cache/player-view.test.mjs"
   },
   "dependencies": {
     "@auth/core": "^0.41.3",

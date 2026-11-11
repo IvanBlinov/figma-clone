@@ -6,7 +6,7 @@ import type { Id } from '../../convex/_generated/dataModel'
 import { AuthForm, ShareDialog } from '../Account'
 import { applyOpsToList } from '../../shared/doc'
 import type { Pt } from '../../shared/geometry'
-import type { Op, SceneNode } from '../../shared/types'
+import type { Op, PrototypeDevice, SceneNode } from '../../shared/types'
 import {
   addAutoLayout,
   bindUploader,
@@ -454,7 +454,13 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
           ))}
         </div>
         {mode === 'design' && <PropertiesPanel fileName={file?.name ?? 'export'} onPageBg={(background) => pageId && void updatePage({ pageId, background })} />}
-        {mode === 'prototype' && <PrototypePanel onPresent={present} />}
+        {mode === 'prototype' && (
+          <PrototypePanel
+            onPresent={present}
+            device={(pages?.find((p) => p._id === pageId) as { prototypeDevice?: PrototypeDevice } | undefined)?.prototypeDevice ?? null}
+            onDevice={readOnly || !pageId ? undefined : (prototypeDevice) => void updatePage({ pageId, prototypeDevice })}
+          />
+        )}
         {mode === 'inspect' && <InspectPanel />}
       </aside>
 

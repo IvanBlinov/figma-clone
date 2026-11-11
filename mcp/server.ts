@@ -25,6 +25,7 @@ import {
   kids,
   parentOf,
   ROOT,
+  screenFrames,
   sortByDocOrder,
   topLevelOnly,
   worldMatrix,
@@ -36,7 +37,7 @@ import { runLayout } from '../shared/layout'
 import { resolveOps } from '../shared/resolve'
 import { exportSvg } from '../shared/svg'
 import { estimateMeasure } from '../shared/text'
-import { defaultsFor, newId, typeLabel, type NodeType, type Op, type Paint, type SceneNode } from '../shared/types'
+import { defaultsFor, newId, typeLabel, type NodeType, type Op, type Paint, type PrototypeDevice, type SceneNode } from '../shared/types'
 
 // ---------- config ----------
 const here = (() => {
@@ -393,6 +394,8 @@ const NODE_GUIDE = `Node model (all coordinates are px, relative to the parent's
 - Boolean shapes: a GROUP with booleanOp "UNION"|"SUBTRACT"|"INTERSECT"|"EXCLUDE" renders its children combined (first child is the base) and takes fills/strokes itself — or use boolean_operation on existing nodes.
 - Masks: isMask:true on a node clips all siblings stacked above it (later in the children array) to its outline.
 - Prototype: reactions:[{trigger:"ON_CLICK"|"ON_HOVER"|"ON_PRESS"|"AFTER_TIMEOUT", action:"NAVIGATE"|"OVERLAY"|"CLOSE_OVERLAY"|"BACK"|"URL", destinationId? (a top-level FRAME), url?, transition?:"INSTANT"|"DISSOLVE"|"SMART_ANIMATE"|"MOVE_IN"|"PUSH"|"SLIDE_IN", direction?, duration? (ms), easing?, timeout? (ms)}] on any node; flowStart:"Flow 1" on a top-level frame marks a starting point. See add_interaction / get_prototype_url.
+  Scrolling: set the page's prototypeDevice (update_page) and any top-level frame taller than it scrolls; scrollBehavior:"FIXED" on a direct child keeps it in place (with constraints:{vertical:"MAX"} it sticks to the device's bottom edge — tab bars). overflowDirection:"HORIZONTAL"|"VERTICAL"|"BOTH" makes a nested frame scroll its own children (carousels); "NONE" on a top-level frame turns its scrolling off.
+  Overlays: on the frame that is opened, overlayPositionType:"CENTER"|"TOP_LEFT"|"TOP_CENTER"|"TOP_RIGHT"|"BOTTOM_LEFT"|"BOTTOM_CENTER"|"BOTTOM_RIGHT", overlayBackground:{type:"NONE"}|{type:"SOLID_COLOR",color,opacity} (default 30 % black), overlayBackgroundInteraction:"CLOSE_ON_CLICK_OUTSIDE" (default)|"NONE". An OVERLAY reaction with transition MOVE_IN and direction TOP slides a bottom sheet up.
 - Shared styles: fillStyleId / strokeStyleId / textStyleId link a node to a style from list_styles (use apply_style); editing the style updates every linked node.`
 
 /**
@@ -555,18 +558,26 @@ tool(
 )
 
 tool('list_pages', 'List the pages of a file.', { fileId }, async ({ fileId }) => {
-  const pages = (await convex.query(api.pages.list, { fileId })) as { _id: string; name: string; background?: string }[]
-  return ok(pages.map((p) => ({ pageId: p._id, name: p.name, background: p.background ?? '#F5F5F5' })))
+  const pages = (await convex.query(api.pages.list, { fileId })) as { _id: string; name: string; background?: string; prototypeDevice?: PrototypeDevice }[]
+  return ok(pages.map((p) => ({ pageId: p._id, name: p.name, background: p.background ?? '#F5F5F5', ...(p.prototypeDevice ? { prototypeDevice: p.prototypeDevice } : {}) })))
 })
 
 tool('create_page', 'Add a page to a file.', { fileId, name: z.string().optional() }, async (a) => ok({ pageId: await convex.mutation(api.pages.create, a) }))
 
 tool(
   'update_page',
-  'Rename a page and/or change its canvas background color.',
-  { pageId: z.string(), name: z.string().optional(), background: z.string().optional().describe('#RRGGBB') },
-  async ({ pageId, name, background }) => {
-    await convex.mutation(api.pages.update, { pageId, name, background: background ? hex(background) : undefined })
+  'Rename a page, change its canvas background color, and/or set the device its prototypes are presented on. With a device, top-level frames taller (or wider) than it scroll in the prototype, and their FIXED layers stay put.',
+  {
+    pageId: z.string(),
+    name: z.string().optional(),
+    background: z.string().optional().describe('#RRGGBB'),
+    prototypeDevice: z
+      .union([z.object({ name: z.string().optional(), width: z.number().min(1).max(10000), height: z.number().min(1).max(10000) }).strict(), z.null()])
+      .optional()
+      .describe('Screen size for prototypes, e.g. {name:"iPhone 17 Pro", width:402, height:874}; null removes it (whole frames are shown)'),
+  },
+  async ({ pageId, name, background, prototypeDevice }) => {
+    await convex.mutation(api.pages.update, { pageId, name, background: background ? hex(background) : undefined, prototypeDevice })
     return ok({ updated: true })
   },
 )
@@ -1065,7 +1076,8 @@ tool(
   { fileId, pageId: pageIdOpt, frameId: z.string().optional().describe('Top-level frame to start from; default: first flow starting point or first frame') },
   async ({ fileId, pageId, frameId }) => {
     const ctx = frameId ? await pageOfNodes(fileId, [frameId]) : await loadPage(fileId, pageId)
-    const frames = kids(ctx.ix, ROOT).map((id) => ctx.ix.byId.get(id)!).filter((n) => n.type === 'FRAME')
+    // Screens inside sections count too, as in the player.
+    const frames = screenFrames(ctx.ix).map((id) => ctx.ix.byId.get(id)!)
     return ok({
       url: `${APP_URL}/#/proto/${fileId}/${ctx.pageId}${frameId ? '/' + frameId : ''}`,
       flows: frames.filter((f) => f.flowStart).map((f) => ({ name: f.flowStart, frameId: f.id, frame: f.name })),

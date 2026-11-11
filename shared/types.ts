@@ -71,6 +71,16 @@ export interface Reaction {
   timeout?: number // ms, AFTER_TIMEOUT only
 }
 
+/** Prototype device: the screen size a prototype is presented at (page setting). Frames larger than it scroll. */
+export interface PrototypeDevice {
+  name?: string
+  width: number
+  height: number
+}
+
+export type OverlayPosition = 'CENTER' | 'TOP_LEFT' | 'TOP_CENTER' | 'TOP_RIGHT' | 'BOTTOM_LEFT' | 'BOTTOM_CENTER' | 'BOTTOM_RIGHT'
+export type OverlayBackground = { type: 'NONE' } | { type: 'SOLID_COLOR'; color: string; opacity?: number }
+
 export interface LayoutGrid {
   pattern: 'GRID' | 'COLUMNS' | 'ROWS'
   size?: number // GRID: cell size
@@ -177,6 +187,14 @@ export interface SceneNode {
   // Prototyping
   reactions?: Reaction[]
   flowStart?: string
+  /** FRAME: which way its content scrolls in a prototype when it is larger than the frame. Top-level frames taller or wider than the device scroll unless this is NONE. */
+  overflowDirection?: 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'BOTH'
+  /** Direct child of a scrolling frame: FIXED stays put while the rest scrolls (a tab bar, a header). Placement follows its constraints, so a bottom-constrained layer sticks to the bottom of the device. */
+  scrollBehavior?: 'SCROLLS' | 'FIXED'
+  /** Top-level FRAME opened as an overlay: where it appears, what is drawn behind it, and whether a click outside closes it. */
+  overlayPositionType?: OverlayPosition
+  overlayBackground?: OverlayBackground
+  overlayBackgroundInteraction?: 'NONE' | 'CLOSE_ON_CLICK_OUTSIDE'
   // Shared styles (see the `styles` table)
   fillStyleId?: string
   strokeStyleId?: string

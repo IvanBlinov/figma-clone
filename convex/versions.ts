@@ -26,7 +26,7 @@ async function snapshot(ctx: MutationCtx, fileId: Id<'files'>, label: string, au
     author,
     createdAt: Date.now(),
     nodeCount: 0,
-    pages: pages.map((p) => ({ pageId: p._id as string, name: p.name, order: p.order, background: p.background })),
+    pages: pages.map((p) => ({ pageId: p._id as string, name: p.name, order: p.order, background: p.background, prototypeDevice: p.prototypeDevice })),
   })
   let count = 0
   for (const p of pages) {
@@ -76,9 +76,9 @@ export const restore = mutation({
       const existing = current.find((p) => p._id === sp.pageId)
       if (existing) {
         await clear(existing._id)
-        await ctx.db.patch(existing._id, { name: sp.name, order: sp.order, background: sp.background })
+        await ctx.db.patch(existing._id, { name: sp.name, order: sp.order, background: sp.background, prototypeDevice: sp.prototypeDevice })
         pageMap.set(sp.pageId, existing._id)
-      } else pageMap.set(sp.pageId, await ctx.db.insert('pages', { fileId, name: sp.name, order: sp.order, background: sp.background }))
+      } else pageMap.set(sp.pageId, await ctx.db.insert('pages', { fileId, name: sp.name, order: sp.order, background: sp.background, prototypeDevice: sp.prototypeDevice }))
     }
     for (const p of current) {
       if (version.pages.some((sp) => sp.pageId === p._id)) continue

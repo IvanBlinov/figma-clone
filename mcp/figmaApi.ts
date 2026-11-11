@@ -123,10 +123,10 @@ const DIRECT = new Set([
   'paddingTop', 'paddingBottom', 'primaryAxisAlignItems', 'layoutMode', 'layoutPositioning', 'layoutSizingHorizontal', 'layoutSizingVertical', 'strokeWeight',
   'strokeAlign', 'dashPattern', 'strokeCap', 'pointCount', 'characters', 'fontSize', 'textAlignHorizontal', 'textAlignVertical', 'textDecoration', 'textCase',
   'constraints', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight', 'description', 'fillStyleId', 'strokeStyleId', 'textStyleId', 'reactions', 'layoutGrids',
-  'constrainProportions', 'arrowStart', 'arrowEnd',
+  'constrainProportions', 'arrowStart', 'arrowEnd', 'overflowDirection', 'scrollBehavior', 'overlayPositionType', 'overlayBackground', 'overlayBackgroundInteraction',
 ])
 const NULLABLE = new Set(['minWidth', 'maxWidth', 'minHeight', 'maxHeight'])
-const IGNORED = new Set(['expanded', 'exportSettings', 'strokeMiterLimit', 'strokeJoin', 'relativeTransform', 'paragraphSpacing', 'paragraphIndent', 'listSpacing', 'hangingPunctuation', 'hangingList', 'leadingTrim', 'strokesIncludedInLayout', 'itemReverseZIndex', 'cornerSmoothing', 'effectStyleId', 'gridStyleId', 'targetAspectRatio', 'annotations', 'devStatus', 'guides', 'overflowDirection', 'numberOfFixedChildren', 'counterAxisAlignContent', 'layoutAlign2', 'fontKerning', 'openTypeFeatures', 'hyperlink', 'textTruncation', 'maxLines'])
+const IGNORED = new Set(['expanded', 'exportSettings', 'strokeMiterLimit', 'strokeJoin', 'relativeTransform', 'paragraphSpacing', 'paragraphIndent', 'listSpacing', 'hangingPunctuation', 'hangingList', 'leadingTrim', 'strokesIncludedInLayout', 'itemReverseZIndex', 'cornerSmoothing', 'effectStyleId', 'gridStyleId', 'targetAspectRatio', 'annotations', 'devStatus', 'guides', 'numberOfFixedChildren', 'counterAxisAlignContent', 'layoutAlign2', 'fontKerning', 'openTypeFeatures', 'hyperlink', 'textTruncation', 'maxLines'])
 
 export async function runFigmaCodeInline(
   code: string,

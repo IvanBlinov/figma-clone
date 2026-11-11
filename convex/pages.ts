@@ -27,13 +27,25 @@ export const create = mutation({
   },
 })
 
+const device = v.object({ name: v.optional(v.string()), width: v.number(), height: v.number() })
+
 export const update = mutation({
-  args: { pageId: v.id('pages'), name: v.optional(v.string()), background: v.optional(v.string()), ...tokenArg },
-  handler: async (ctx, { pageId, name, background, token }) => {
+  args: {
+    pageId: v.id('pages'),
+    name: v.optional(v.string()),
+    background: v.optional(v.string()),
+    /** null removes the device, so prototypes show whole frames again. */
+    prototypeDevice: v.optional(v.union(device, v.null())),
+    ...tokenArg,
+  },
+  handler: async (ctx, { pageId, name, background, prototypeDevice, token }) => {
     await pageAccess(ctx, pageId, token, 'edit')
-    const patch: Record<string, string> = {}
+    if (prototypeDevice && !(prototypeDevice.width >= 1 && prototypeDevice.height >= 1 && prototypeDevice.width <= 10000 && prototypeDevice.height <= 10000))
+      throw new ConvexError('A prototype device must be between 1 and 10000 px on each side')
+    const patch: { name?: string; background?: string; prototypeDevice?: { name?: string; width: number; height: number } | undefined } = {}
     if (name !== undefined) patch.name = name
     if (background !== undefined) patch.background = background
+    if (prototypeDevice !== undefined) patch.prototypeDevice = prototypeDevice ?? undefined
     await ctx.db.patch(pageId, patch)
   },
 })
