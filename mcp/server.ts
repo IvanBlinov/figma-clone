@@ -1071,7 +1071,7 @@ tool(
     nodeId: z.string(),
     trigger: z.enum(['ON_CLICK', 'ON_HOVER', 'ON_PRESS', 'AFTER_TIMEOUT']).optional().describe('Default ON_CLICK'),
     action: z.enum(['NAVIGATE', 'OVERLAY', 'SWAP_OVERLAY', 'CLOSE_OVERLAY', 'BACK', 'URL']).optional().describe('Default NAVIGATE. SWAP_OVERLAY replaces the open overlay'),
-    destinationId: z.string().optional().describe('Top-level FRAME to navigate to / open as overlay'),
+    destinationId: z.string().optional().describe('Screen to navigate to / open as overlay: a top-level FRAME or a frame directly inside a section'),
     url: z.string().optional(),
     transition: z.enum(['INSTANT', 'DISSOLVE', 'SMART_ANIMATE', 'MOVE_IN', 'PUSH', 'SLIDE_IN']).optional(),
     direction: z.enum(['LEFT', 'RIGHT', 'TOP', 'BOTTOM']).optional(),
@@ -1083,7 +1083,8 @@ tool(
     const n = ctx.ix.byId.get(nodeId)!
     const act = action ?? 'NAVIGATE'
     if ((act === 'NAVIGATE' || act === 'OVERLAY' || act === 'SWAP_OVERLAY') && !destinationId) throw new Error(`${act} needs destinationId (a top-level FRAME)`)
-    if (destinationId && (ctx.ix.byId.get(destinationId)!.type !== 'FRAME' || ctx.ix.byId.get(destinationId)!.parentId)) throw new Error('destinationId must be a top-level FRAME')
+    // A screen: a frame on the page itself or inside a section (sections only organise screens).
+    if (destinationId && !screenFrames(ctx.ix).includes(destinationId)) throw new Error('destinationId must be a screen: a top-level FRAME, or a frame directly inside a section')
     const r: Record<string, unknown> = { trigger: trigger ?? 'ON_CLICK', action: act }
     if (destinationId) r.destinationId = destinationId
     if (url) r.url = url
