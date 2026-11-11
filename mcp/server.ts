@@ -1229,12 +1229,12 @@ tool(
       const pages = (await convex.query(api.pages.list, { fileId })) as { _id: string; background?: string }[]
       background = pages.find((p) => p._id === ctx.pageId)?.background ?? '#F5F5F5'
     }
-    // Download every image first, so the picture is complete (or says what is absent).
-    const { images, missing, total } = format === 'svg' ? { images: new Map<string, string>(), missing: [], total: 0 } : await inlineImages(ctx.ix, ids)
     const probe = exportSvg(ctx.ix, ids, { measure: estimateMeasure })
     let s = scale ?? 1
     const maxSide = Math.max(probe.width, probe.height) * s
     if (maxSide > 2400) s *= 2400 / maxSide
+    // Download every image first, so the picture is complete (or says what is absent), shrunk to the size it is drawn at.
+    const { images, missing, total } = format === 'svg' ? { images: new Map<string, string>(), missing: [], total: 0 } : await inlineImages(ctx.ix, ids, s)
     const { svg, width, height } = exportSvg(ctx.ix, ids, { measure: estimateMeasure, background, scale: s, images })
     if (format === 'svg') return ok(svg)
     const note = missingNote(missing, total)
