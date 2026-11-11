@@ -85,3 +85,28 @@ test('overlay positions follow Figma', () => {
   assert.deepEqual(overlayOrigin('TOP_LEFT', stage, 200, 100), { x: 100, y: 50 })
   assert.deepEqual(overlayOrigin('TOP_RIGHT', stage, 200, 100), { x: 302, y: 50 })
 })
+
+test('a frame that is not cut keeps its own clipping', () => {
+  const ix = buildIndex([node({ id: 'card', width: 300, height: 200, clipsContent: false })])
+  assert.equal(frameView(ix, 'card', phone, {}).ix.byId.get('card')!.clipsContent, false)
+  assert.equal(frameView(ix, 'card', null, {}).ix.byId.get('card')!.clipsContent, false)
+})
+
+test('an overflow direction limits which way a top-level frame is cut', () => {
+  const wide = node({ id: 'w', width: 1000, height: 1600, overflowDirection: 'VERTICAL' })
+  assert.deepEqual(viewportOf(wide, phone), { width: 1000, height: 874 })
+  assert.deepEqual(viewportOf({ ...wide, overflowDirection: 'HORIZONTAL' }, phone), { width: 402, height: 1600 })
+  assert.deepEqual(viewportOf({ ...wide, overflowDirection: undefined }, phone), { width: 402, height: 874 })
+})
+
+test('fixed layers that stretch or scale follow the cut', () => {
+  const ix = buildIndex([
+    node({ id: 'f', width: 402, height: 1600 }),
+    node({ id: 'rail', parentId: 'f', x: 0, y: 100, width: 40, height: 1400, scrollBehavior: 'FIXED', constraints: { vertical: 'STRETCH' } }),
+    node({ id: 'mark', parentId: 'f', x: 0, y: 800, width: 40, height: 160, scrollBehavior: 'FIXED', constraints: { vertical: 'SCALE' } }),
+  ])
+  const v = frameView(ix, 'f', phone, {})
+  assert.equal(v.ix.byId.get('rail')!.height, 1400 - 726)
+  assert.equal(v.ix.byId.get('mark')!.y, 800 * (874 / 1600))
+  assert.equal(v.ix.byId.get('mark')!.height, 160 * (874 / 1600))
+})

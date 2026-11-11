@@ -203,11 +203,13 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     const s = Math.min(1, vw / v.width, vh / v.height)
     return { v, s, x: (vw - v.width * s) / 2, y: (vh - v.height * s) / 2 }
   }
-  /** Another screen drawn at the current one's scale (during a transition), centred the same way. */
+  /** Another screen (the one a transition leaves), fitted and centred on its own, as it was shown. */
   const placeScreen = (id: string, scroll: Scroll): Placed => {
-    const st = stage()
     const v = viewOf(id, scroll)
-    return { v, s: st.s, x: (window.innerWidth - v.width * st.s) / 2, y: (window.innerHeight - BAR - v.height * st.s) / 2 }
+    const vw = window.innerWidth
+    const vh = window.innerHeight - BAR
+    const s = Math.min(1, vw / v.width, vh / v.height)
+    return { v, s, x: (vw - v.width * s) / 2, y: (vh - v.height * s) / 2 }
   }
   /** An overlay at its overlay position on the current screen. */
   const placeOverlay = (o: Overlay): Placed => {
@@ -339,17 +341,23 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
     }
     return null
   }
-  /** Scroll whatever is under the pointer; true when something moved. */
-  const scrollAt = (layer: 'screen' | 'overlay', path: string[], dx: number, dy: number): boolean => {
+  /** Scroll whatever is under the pointer; returns the frame that moved, or null. */
+  const scrollAt = (layer: 'screen' | 'overlay', path: string[], dx: number, dy: number): string | null => {
     const st = state.current
     const owner: Screen | null = layer === 'overlay' ? topOverlay() : topScreen()
-    if (!owner || st.anim) return false
+    if (!owner || st.anim) return null
     const next = scrollBy(viewOf(owner.id, owner.scroll), owner.scroll, path, dx, dy)
-    if (!next) return false
+    if (!next) return null
+    const movedId = Object.keys(next).find((k) => next[k] !== owner.scroll[k]) ?? null
     owner.scroll = next
     redraw.current()
-    return true
+    return movedId
   }
+
+  const slides = (o: Overlay) => o.via?.transition === 'MOVE_IN' || o.via?.transition === 'SLIDE_IN' || o.via?.transition === 'PUSH'
+  const overlayDuration = (o: Overlay) => (slides(o) ? Math.max(1, o.via?.duration ?? 300) : 180)
+  /** True while an overlay is still sliding or fading in: where it is drawn is not yet where it is hit-tested. */
+  const overlayMoving = () => state.current.overlays.some((o) => performance.now() - o.t0 < overlayDuration(o))
 
   // ---------- drawing ----------
   useEffect(() => {
@@ -376,11 +384,11 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
       let again = false
       const box = stage()
       const stageRect = () => ctx.rect(box.x * dpr, box.y * dpr, box.v.width * box.s * dpr, box.v.height * box.s * dpr)
-      const paint = (p: Placed, ix: DocIndex, alpha: number, ox = 0, oy = 0) => {
+      const paint = (p: Placed, ix: DocIndex, alpha: number, ox = 0, oy = 0, clip = false) => {
         ctx.save()
         ctx.setTransform(1, 0, 0, 1, 0, 0)
-        // Keep sliding screens inside the stage of the current frame.
-        if (ox || oy) {
+        // Keep sliding screens, and everything drawn during a transition, inside the stage of the current frame.
+        if (ox || oy || clip) {
           ctx.beginPath()
           stageRect()
           ctx.clip()
@@ -403,11 +411,11 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
         const vy = a.direction === 'TOP' ? h : a.direction === 'BOTTOM' ? -h : 0
         switch (a.transition) {
           case 'DISSOLVE':
-            paint(from, from.v.ix, 1)
+            paint(from, from.v.ix, 1, 0, 0, true)
             paint(to, to.v.ix, e)
             break
           case 'MOVE_IN':
-            paint(from, from.v.ix, 1)
+            paint(from, from.v.ix, 1, 0, 0, true)
             paint(to, to.v.ix, 1, vx * (1 - e), vy * (1 - e))
             break
           case 'PUSH':
@@ -419,7 +427,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
             paint(to, to.v.ix, 1, vx * (1 - e), vy * (1 - e))
             break
           case 'SMART_ANIMATE':
-            paint(from, from.v.ix, 1)
+            paint(from, from.v.ix, 1, 0, 0, true)
             paint(to, smartIndex(from.v.ix, a.from, to.v.ix, a.to, e), Math.min(1, e * 3))
             break
           default:
@@ -435,8 +443,8 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
         if (!d.ix.byId.has(o.id)) continue
         const f = d.ix.byId.get(o.id)!
         const r = o.via
-        const moves = r?.transition === 'MOVE_IN' || r?.transition === 'SLIDE_IN' || r?.transition === 'PUSH'
-        const dur = moves ? Math.max(1, r?.duration ?? 300) : 180
+        const moves = slides(o)
+        const dur = overlayDuration(o)
         const raw = Math.min(1, (performance.now() - o.t0) / dur)
         const t = moves ? ease(raw, r?.easing ?? 'EASE_OUT') : raw
         if (raw < 1) again = true
@@ -538,6 +546,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
 
   // Dragging (a finger, or the mouse) scrolls; a press that barely moves stays a click.
   const onPointerDown = (e: React.PointerEvent) => {
+    swallowClick.current = false
     if (e.button !== 0) return
     const hit = pointed(e.clientX, e.clientY)
     drag.current = { x: e.clientX, y: e.clientY, moved: false, path: hit?.path ?? null, layer: hit?.layer ?? 'screen' }
@@ -555,7 +564,11 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
       g.x = e.clientX
       g.y = e.clientY
       const s = stage().s
-      if (g.path) scrollAt(g.layer, g.path, -dx / s, -dy / s)
+      // The frame that takes the first movement keeps the gesture, so a carousel reaching its end doesn't hand it to the page.
+      if (g.path) {
+        const movedId = scrollAt(g.layer, g.path, -dx / s, -dy / s)
+        if (movedId && g.path.length > 1) g.path = [movedId]
+      }
       return
     }
     onHover(e)
@@ -563,9 +576,12 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
   const onPointerUp = (e: React.PointerEvent) => {
     const g = drag.current
     drag.current = null
-    if (g?.moved) {
+    if (!g?.moved) return
+    if (canvasRef.current!.hasPointerCapture(e.pointerId)) canvasRef.current!.releasePointerCapture(e.pointerId)
+    // The click a browser may send after a drag is not a tap. It comes right away if at all, so the flag never outlives it.
+    if (e.type === 'pointerup') {
       swallowClick.current = true
-      if (canvasRef.current!.hasPointerCapture(e.pointerId)) canvasRef.current!.releasePointerCapture(e.pointerId)
+      setTimeout(() => (swallowClick.current = false), 0)
     }
   }
 
@@ -575,7 +591,7 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
       swallowClick.current = false
       return
     }
-    if (st.anim) return
+    if (st.anim || overlayMoving()) return
     const video = videoAt(e.clientX, e.clientY)
     if (video) return toggleVideo(video)
     const hit = reactionAt(e.clientX, e.clientY, ['ON_CLICK', 'ON_PRESS'])

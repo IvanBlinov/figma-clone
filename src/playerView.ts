@@ -27,8 +27,12 @@ const scrollsY = (n: SceneNode) => n.overflowDirection === 'VERTICAL' || n.overf
 
 /** The visible size of a top-level frame: as Figma does, a frame larger than the device scrolls (unless it is set to NONE). */
 export function viewportOf(frame: SceneNode, device?: PrototypeDevice | null): { width: number; height: number } {
-  if (!device || frame.overflowDirection === 'NONE') return { width: frame.width, height: frame.height }
-  return { width: Math.min(frame.width, device.width), height: Math.min(frame.height, device.height) }
+  const o = frame.overflowDirection
+  if (!device || o === 'NONE') return { width: frame.width, height: frame.height }
+  // Unset scrolls whichever way the frame is larger; a set direction limits it to that axis.
+  const x = !o || o === 'HORIZONTAL' || o === 'BOTH'
+  const y = !o || o === 'VERTICAL' || o === 'BOTH'
+  return { width: x ? Math.min(frame.width, device.width) : frame.width, height: y ? Math.min(frame.height, device.height) : frame.height }
 }
 
 /** How far a nested frame's content reaches past its own edges. */
@@ -49,14 +53,24 @@ function contentRange(ix: DocIndex, n: SceneNode): Range {
 
 const clamp = (v: number, max: number) => Math.min(Math.max(0, v), max)
 
-/** Where a fixed layer of a top-level frame sits on the device: its constraints decide which edge it keeps its distance to. */
-function pinned(c: SceneNode, cutX: number, cutY: number): { x: number; y: number } {
-  const h = c.constraints?.horizontal
-  const v = c.constraints?.vertical
-  return {
-    x: c.x - (h === 'MAX' ? cutX : h === 'CENTER' ? cutX / 2 : 0),
-    y: c.y - (v === 'MAX' ? cutY : v === 'CENTER' ? cutY / 2 : 0),
+/** One axis of a fixed layer on a frame cut by `cut` from `size`: its constraint decides how it follows the device's edges. */
+function pinAxis(pos: number, len: number, c: string | undefined, cut: number, size: number): [number, number] {
+  if (!cut) return [pos, len]
+  if (c === 'MAX') return [pos - cut, len]
+  if (c === 'CENTER') return [pos - cut / 2, len]
+  if (c === 'STRETCH') return [pos, Math.max(0, len - cut)]
+  if (c === 'SCALE') {
+    const k = (size - cut) / size
+    return [pos * k, len * k]
   }
+  return [pos, len]
+}
+
+/** Where a fixed layer of a top-level frame sits on the device. */
+function pinned(c: SceneNode, cutX: number, cutY: number, frame: SceneNode): Pick<SceneNode, 'x' | 'y' | 'width' | 'height'> {
+  const [x, width] = pinAxis(c.x, c.width, c.constraints?.horizontal, cutX, frame.width)
+  const [y, height] = pinAxis(c.y, c.height, c.constraints?.vertical, cutY, frame.height)
+  return { x, y, width, height }
 }
 
 /**
@@ -83,15 +97,16 @@ export function frameView(ix: DocIndex, frameId: string, device: PrototypeDevice
     return r && s ? { x: clamp(s.x, r.x), y: clamp(s.y, r.y) } : { x: 0, y: 0 }
   }
   const moved = new Map<string, SceneNode>()
-  // The frame itself: re-rooted, cut to the device and always clipping, as a phone screen does.
-  moved.set(frameId, { ...frame, parentId: undefined, x: 0, y: 0, rotation: 0, width: vp.width, height: vp.height, clipsContent: true })
+  // The frame itself, re-rooted. Cut to the device, it clips as a phone screen does; otherwise it is drawn as authored.
+  const cut = cutX > 0 || cutY > 0
+  moved.set(frameId, { ...frame, parentId: undefined, x: 0, y: 0, rotation: 0, width: vp.width, height: vp.height, clipsContent: cut ? true : frame.clipsContent })
   for (const parent of [frameId, ...ids]) {
     if (!ranges.has(parent) && parent !== frameId) continue
     const o = offset(parent)
     for (const id of kids(ix, parent)) {
       const c = moved.get(id) ?? ix.byId.get(id)!
       if (c.scrollBehavior === 'FIXED') {
-        if (parent === frameId) moved.set(id, { ...c, ...pinned(c, cutX, cutY) })
+        if (parent === frameId) moved.set(id, { ...c, ...pinned(c, cutX, cutY, frame) })
         continue
       }
       if (o.x || o.y) moved.set(id, { ...c, x: c.x - o.x, y: c.y - o.y })
