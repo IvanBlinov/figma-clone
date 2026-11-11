@@ -423,7 +423,7 @@ const NODE_GUIDE = `Node model (all coordinates are px, relative to the parent's
   A FRAME with isComponentSet:true groups variants (components named like "State=Hover"); switch an instance's variant by updating its componentId.
 - Boolean shapes: a GROUP with booleanOp "UNION"|"SUBTRACT"|"INTERSECT"|"EXCLUDE" renders its children combined (first child is the base) and takes fills/strokes itself — or use boolean_operation on existing nodes.
 - Masks: isMask:true on a node clips all siblings stacked above it (later in the children array) to its outline.
-- Prototype: reactions:[{trigger:"ON_CLICK"|"ON_HOVER"|"ON_PRESS"|"AFTER_TIMEOUT", action:"NAVIGATE"|"OVERLAY"|"CLOSE_OVERLAY"|"BACK"|"URL", destinationId? (a top-level FRAME), url?, transition?:"INSTANT"|"DISSOLVE"|"SMART_ANIMATE"|"MOVE_IN"|"PUSH"|"SLIDE_IN", direction?, duration? (ms), easing?, timeout? (ms)}] on any node; flowStart:"Flow 1" on a top-level frame marks a starting point. See add_interaction / get_prototype_url.
+- Prototype: reactions:[{trigger:"ON_CLICK"|"ON_HOVER"|"ON_PRESS"|"AFTER_TIMEOUT", action:"NAVIGATE"|"OVERLAY"|"SWAP_OVERLAY"|"CLOSE_OVERLAY"|"BACK"|"URL", destinationId? (a top-level FRAME), url?, transition?:"INSTANT"|"DISSOLVE"|"SMART_ANIMATE"|"MOVE_IN"|"PUSH"|"SLIDE_IN", direction?, duration? (ms), easing?, timeout? (ms)}] on any node; flowStart:"Flow 1" on a top-level frame marks a starting point. See add_interaction / get_prototype_url.
   Scrolling: set the page's prototypeDevice (update_page) and any top-level frame taller than it scrolls; scrollBehavior:"FIXED" on a direct child keeps it in place (with constraints:{vertical:"MAX"} it sticks to the device's bottom edge — tab bars). overflowDirection:"HORIZONTAL"|"VERTICAL"|"BOTH" makes a nested frame scroll its own children (carousels); "NONE" on a top-level frame turns its scrolling off.
   Overlays: on the frame that is opened, overlayPositionType:"CENTER"|"TOP_LEFT"|"TOP_CENTER"|"TOP_RIGHT"|"BOTTOM_LEFT"|"BOTTOM_CENTER"|"BOTTOM_RIGHT", overlayBackground:{type:"NONE"}|{type:"SOLID_COLOR",color,opacity} (default 30 % black), overlayBackgroundInteraction:"CLOSE_ON_CLICK_OUTSIDE" (default)|"NONE". An OVERLAY reaction with transition MOVE_IN and direction TOP slides a bottom sheet up.
 - Shared styles: fillStyleId / strokeStyleId / textStyleId link a node to a style from list_styles (use apply_style); editing the style updates every linked node.`
@@ -1070,7 +1070,7 @@ tool(
     fileId,
     nodeId: z.string(),
     trigger: z.enum(['ON_CLICK', 'ON_HOVER', 'ON_PRESS', 'AFTER_TIMEOUT']).optional().describe('Default ON_CLICK'),
-    action: z.enum(['NAVIGATE', 'OVERLAY', 'CLOSE_OVERLAY', 'BACK', 'URL']).optional().describe('Default NAVIGATE'),
+    action: z.enum(['NAVIGATE', 'OVERLAY', 'SWAP_OVERLAY', 'CLOSE_OVERLAY', 'BACK', 'URL']).optional().describe('Default NAVIGATE. SWAP_OVERLAY replaces the open overlay'),
     destinationId: z.string().optional().describe('Top-level FRAME to navigate to / open as overlay'),
     url: z.string().optional(),
     transition: z.enum(['INSTANT', 'DISSOLVE', 'SMART_ANIMATE', 'MOVE_IN', 'PUSH', 'SLIDE_IN']).optional(),
@@ -1082,12 +1082,12 @@ tool(
     const ctx = await pageOfNodes(fileId, destinationId ? [nodeId, destinationId] : [nodeId])
     const n = ctx.ix.byId.get(nodeId)!
     const act = action ?? 'NAVIGATE'
-    if ((act === 'NAVIGATE' || act === 'OVERLAY') && !destinationId) throw new Error(`${act} needs destinationId (a top-level FRAME)`)
+    if ((act === 'NAVIGATE' || act === 'OVERLAY' || act === 'SWAP_OVERLAY') && !destinationId) throw new Error(`${act} needs destinationId (a top-level FRAME)`)
     if (destinationId && (ctx.ix.byId.get(destinationId)!.type !== 'FRAME' || ctx.ix.byId.get(destinationId)!.parentId)) throw new Error('destinationId must be a top-level FRAME')
     const r: Record<string, unknown> = { trigger: trigger ?? 'ON_CLICK', action: act }
     if (destinationId) r.destinationId = destinationId
     if (url) r.url = url
-    if (act === 'NAVIGATE' || act === 'OVERLAY') {
+    if (act === 'NAVIGATE' || act === 'OVERLAY' || act === 'SWAP_OVERLAY') {
       r.transition = transition ?? 'DISSOLVE'
       r.duration = duration ?? 300
       r.easing = 'EASE_OUT'

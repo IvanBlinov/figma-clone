@@ -61,7 +61,8 @@ export interface Constraints {
 /** Prototype interaction. */
 export interface Reaction {
   trigger: 'ON_CLICK' | 'ON_HOVER' | 'ON_PRESS' | 'AFTER_TIMEOUT'
-  action: 'NAVIGATE' | 'OVERLAY' | 'CLOSE_OVERLAY' | 'BACK' | 'URL'
+  /** SWAP_OVERLAY replaces the open overlay with the destination (Figma's "Swap overlay"). */
+  action: 'NAVIGATE' | 'OVERLAY' | 'SWAP_OVERLAY' | 'CLOSE_OVERLAY' | 'BACK' | 'URL'
   destinationId?: string
   url?: string
   transition?: 'INSTANT' | 'DISSOLVE' | 'SMART_ANIMATE' | 'MOVE_IN' | 'PUSH' | 'SLIDE_IN'

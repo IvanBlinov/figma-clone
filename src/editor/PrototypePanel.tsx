@@ -14,6 +14,7 @@ const TRIGGERS: { value: Reaction['trigger']; label: string }[] = [
 const ACTIONS: { value: Reaction['action']; label: string }[] = [
   { value: 'NAVIGATE', label: 'Navigate to' },
   { value: 'OVERLAY', label: 'Open overlay' },
+  { value: 'SWAP_OVERLAY', label: 'Swap overlay' },
   { value: 'CLOSE_OVERLAY', label: 'Close overlay' },
   { value: 'BACK', label: 'Back' },
   { value: 'URL', label: 'Open link' },
@@ -231,7 +232,7 @@ export function PrototypePanel({ onPresent, device = null, onDevice }: { onPrese
       >
         {reactions.length === 0 && <div className="hint">Drag the ⊕ handle on the canvas to a frame, or click + to add an interaction.</div>}
         {reactions.map((r, i) => {
-          const needsDest = r.action === 'NAVIGATE' || r.action === 'OVERLAY'
+          const needsDest = r.action === 'NAVIGATE' || r.action === 'OVERLAY' || r.action === 'SWAP_OVERLAY'
           const animated = needsDest && (r.transition ?? 'INSTANT') !== 'INSTANT'
           const directional = r.transition === 'MOVE_IN' || r.transition === 'PUSH' || r.transition === 'SLIDE_IN'
           return (
@@ -248,7 +249,7 @@ export function PrototypePanel({ onPresent, device = null, onDevice }: { onPrese
                 </div>
               )}
               <div className="row">
-                <Select className="grow" value={r.action} options={ACTIONS} onChange={(action) => at(i, { action, ...(action === 'NAVIGATE' || action === 'OVERLAY' ? { destinationId: r.destinationId ?? dests[0]?.value } : {}) })} />
+                <Select className="grow" value={r.action} options={ACTIONS} onChange={(action) => at(i, { action, ...(action === 'NAVIGATE' || action === 'OVERLAY' || action === 'SWAP_OVERLAY' ? { destinationId: r.destinationId ?? dests[0]?.value } : {}) })} />
               </div>
               {needsDest && (
                 <div className="row">

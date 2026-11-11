@@ -266,6 +266,13 @@ export function Player({ fileId, pageId, frameId }: { fileId: Id<'files'>; pageI
           redraw.current()
         }
         break
+      case 'SWAP_OVERLAY':
+        if (r.destinationId && d.ix.byId.has(r.destinationId)) {
+          st.overlays.pop()
+          st.overlays.push({ id: r.destinationId, via: r, scroll: {}, t0: performance.now() })
+          redraw.current()
+        }
+        break
       case 'CLOSE_OVERLAY':
         st.overlays.pop()
         redraw.current()

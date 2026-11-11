@@ -131,7 +131,7 @@ export function reactionsFromFigma(list: unknown): CloneReaction[] {
         const easing = tr && tr.easing ? pick((tr.easing as Rec).type, EASINGS) : undefined
         out.push({
           ...base,
-          action: a.navigation === 'OVERLAY' || a.navigation === 'SWAP' ? 'OVERLAY' : 'NAVIGATE',
+          action: a.navigation === 'OVERLAY' ? 'OVERLAY' : a.navigation === 'SWAP' ? 'SWAP_OVERLAY' : 'NAVIGATE',
           destinationId: a.destinationId,
           transition: kind ?? 'INSTANT',
           ...(kind && tr && pick(tr.direction, ['LEFT', 'RIGHT', 'TOP', 'BOTTOM'] as const) ? { direction: tr.direction } : {}),
@@ -158,7 +158,7 @@ export function reactionsToFigma(list: CloneReaction[] | undefined): Rec[] {
             : {
                 type: 'NODE',
                 destinationId: r.destinationId ?? null,
-                navigation: r.action === 'OVERLAY' ? 'OVERLAY' : 'NAVIGATE',
+                navigation: r.action === 'OVERLAY' ? 'OVERLAY' : r.action === 'SWAP_OVERLAY' ? 'SWAP' : 'NAVIGATE',
                 transition:
                   !r.transition || r.transition === 'INSTANT'
                     ? null

@@ -23,3 +23,9 @@ test('round trip keeps the meaning', () => {
   const mine = [{ trigger: 'ON_CLICK' as const, action: 'OVERLAY' as const, destinationId: 's', transition: 'MOVE_IN' as const, direction: 'TOP' as const, duration: 350, easing: 'EASE_OUT' as const }]
   assert.deepEqual(reactionsFromFigma(reactionsToFigma(mine)), mine)
 })
+
+test('swap overlay round-trips', () => {
+  const [r] = reactionsFromFigma([{ trigger: { type: 'ON_CLICK' }, actions: [{ type: 'NODE', destinationId: 'x', navigation: 'SWAP', transition: null }] }])
+  assert.equal(r.action, 'SWAP_OVERLAY')
+  assert.equal((reactionsToFigma([r])[0].actions as { navigation: string }[])[0].navigation, 'SWAP')
+})
