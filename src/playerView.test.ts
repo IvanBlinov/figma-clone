@@ -110,3 +110,13 @@ test('fixed layers that stretch or scale follow the cut', () => {
   assert.equal(v.ix.byId.get('mark')!.y, 800 * (874 / 1600))
   assert.equal(v.ix.byId.get('mark')!.height, 160 * (874 / 1600))
 })
+
+test('fixed layers draw above the content that scrolls under them', () => {
+  const ix = buildIndex([
+    node({ id: 'f', width: 402, height: 1600 }),
+    node({ id: 'header', parentId: 'f', order: 0, x: 0, y: 0, width: 402, height: 120, scrollBehavior: 'FIXED' }),
+    node({ id: 'content', parentId: 'f', order: 1, x: 0, y: 120, width: 402, height: 1400 }),
+  ])
+  const v = frameView(ix, 'f', phone, { f: { x: 0, y: 200 } })
+  assert.deepEqual(v.ix.children.get('f'), ['content', 'header'])
+})

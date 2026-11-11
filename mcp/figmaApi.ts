@@ -100,6 +100,75 @@ function paintsToFigma(list: Paint[] | undefined): Rec[] {
   })
 }
 
+// ---------- prototyping: Figma's reaction shape <-> this file's ----------
+type CloneReaction = NonNullable<SceneNode['reactions']>[number]
+const TRIGGERS = ['ON_CLICK', 'ON_HOVER', 'ON_PRESS', 'AFTER_TIMEOUT'] as const
+const TRANSITIONS = ['DISSOLVE', 'SMART_ANIMATE', 'MOVE_IN', 'PUSH', 'SLIDE_IN'] as const
+const EASINGS = ['LINEAR', 'EASE_IN', 'EASE_OUT', 'EASE_IN_OUT'] as const
+const pick = <T extends string>(v: unknown, list: readonly T[]): T | undefined => (list as readonly string[]).includes(v as string) ? (v as T) : undefined
+
+/** Figma reactions ({trigger:{type}, actions:[{type:'NODE', destinationId, navigation, transition}]}) in this file's shape. Already-converted ones pass through. */
+export function reactionsFromFigma(list: unknown): CloneReaction[] {
+  if (!Array.isArray(list)) return []
+  const out: CloneReaction[] = []
+  for (const r of list as Rec[]) {
+    if (typeof r.trigger === 'string') {
+      out.push(r as unknown as CloneReaction)
+      continue
+    }
+    const t = (r.trigger ?? {}) as Rec
+    const trigger = pick(t.type === 'MOUSE_ENTER' ? 'ON_HOVER' : t.type, TRIGGERS) ?? 'ON_CLICK'
+    const timeout = trigger === 'AFTER_TIMEOUT' && typeof t.timeout === 'number' ? Math.round(t.timeout * 1000) : undefined
+    const actions = (Array.isArray(r.actions) ? r.actions : r.action ? [r.action] : []) as Rec[]
+    for (const a of actions.slice(0, 1)) {
+      const base: Rec = { trigger, ...(timeout !== undefined ? { timeout } : {}) }
+      if (a.type === 'BACK') out.push({ ...base, action: 'BACK' } as CloneReaction)
+      else if (a.type === 'CLOSE') out.push({ ...base, action: 'CLOSE_OVERLAY' } as CloneReaction)
+      else if (a.type === 'URL' && typeof a.url === 'string') out.push({ ...base, action: 'URL', url: a.url } as CloneReaction)
+      else if (a.type === 'NODE' && typeof a.destinationId === 'string') {
+        const tr = (a.transition ?? null) as Rec | null
+        const kind = tr ? pick(tr.type, TRANSITIONS) : undefined
+        const easing = tr && tr.easing ? pick((tr.easing as Rec).type, EASINGS) : undefined
+        out.push({
+          ...base,
+          action: a.navigation === 'OVERLAY' || a.navigation === 'SWAP' ? 'OVERLAY' : 'NAVIGATE',
+          destinationId: a.destinationId,
+          transition: kind ?? 'INSTANT',
+          ...(kind && tr && pick(tr.direction, ['LEFT', 'RIGHT', 'TOP', 'BOTTOM'] as const) ? { direction: tr.direction } : {}),
+          ...(kind && tr && typeof tr.duration === 'number' ? { duration: Math.round((tr.duration as number) * 1000) } : {}),
+          ...(easing ? { easing } : {}),
+        } as CloneReaction)
+      }
+    }
+  }
+  return out
+}
+
+/** This file's reactions in Figma's shape. */
+export function reactionsToFigma(list: CloneReaction[] | undefined): Rec[] {
+  return (list ?? []).map((r) => {
+    const trigger: Rec = { type: r.trigger === 'ON_HOVER' ? 'ON_HOVER' : r.trigger, ...(r.trigger === 'AFTER_TIMEOUT' ? { timeout: (r.timeout ?? 800) / 1000 } : {}) }
+    const action: Rec =
+      r.action === 'BACK'
+        ? { type: 'BACK' }
+        : r.action === 'CLOSE_OVERLAY'
+          ? { type: 'CLOSE' }
+          : r.action === 'URL'
+            ? { type: 'URL', url: r.url }
+            : {
+                type: 'NODE',
+                destinationId: r.destinationId ?? null,
+                navigation: r.action === 'OVERLAY' ? 'OVERLAY' : 'NAVIGATE',
+                transition:
+                  !r.transition || r.transition === 'INSTANT'
+                    ? null
+                    : { type: r.transition, direction: r.direction ?? 'LEFT', duration: (r.duration ?? 300) / 1000, easing: { type: r.easing ?? 'EASE_OUT' }, matchLayers: false },
+                preserveScrollPosition: false,
+              }
+    return { trigger, actions: [action] }
+  })
+}
+
 function effectsFromFigma(list: unknown): Effect[] {
   if (!Array.isArray(list)) throw new Error('effects must be an array')
   return list.map((raw) => {
@@ -127,8 +196,8 @@ const DIRECT = new Set([
   'name', 'x', 'y', 'opacity', 'visible', 'locked', 'blendMode', 'isMask', 'clipsContent', 'itemSpacing', 'counterAxisSpacing', 'paddingLeft', 'paddingRight',
   'paddingTop', 'paddingBottom', 'primaryAxisAlignItems', 'layoutMode', 'layoutPositioning', 'layoutSizingHorizontal', 'layoutSizingVertical', 'strokeWeight',
   'strokeAlign', 'dashPattern', 'strokeCap', 'pointCount', 'characters', 'fontSize', 'textAlignHorizontal', 'textAlignVertical', 'textDecoration', 'textCase',
-  'constraints', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight', 'description', 'fillStyleId', 'strokeStyleId', 'textStyleId', 'reactions', 'layoutGrids',
-  'constrainProportions', 'arrowStart', 'arrowEnd', 'overflowDirection', 'scrollBehavior', 'overlayPositionType', 'overlayBackground', 'overlayBackgroundInteraction',
+  'constraints', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight', 'description', 'fillStyleId', 'strokeStyleId', 'textStyleId', 'layoutGrids',
+  'constrainProportions', 'arrowStart', 'arrowEnd', 'overflowDirection', 'scrollBehavior', 'overlayPositionType', 'overlayBackgroundInteraction',
 ])
 const NULLABLE = new Set(['minWidth', 'maxWidth', 'minHeight', 'maxHeight'])
 const IGNORED = new Set(['expanded', 'exportSettings', 'strokeMiterLimit', 'strokeJoin', 'relativeTransform', 'paragraphSpacing', 'paragraphIndent', 'listSpacing', 'hangingPunctuation', 'hangingList', 'leadingTrim', 'strokesIncludedInLayout', 'itemReverseZIndex', 'cornerSmoothing', 'effectStyleId', 'gridStyleId', 'targetAspectRatio', 'annotations', 'devStatus', 'guides', 'numberOfFixedChildren', 'counterAxisAlignContent', 'layoutAlign2', 'fontKerning', 'openTypeFeatures', 'hyperlink', 'textTruncation', 'maxLines'])
@@ -439,6 +508,11 @@ export async function runFigmaCodeInline(
     },
     getSharedPluginDataKeys: (n) => (ns: string) => Object.keys(n.sharedPluginData?.[ns] ?? {}),
     setRelaunchData: () => () => {},
+    setReactionsAsync: (n) => async (v: unknown) => {
+      const list = reactionsFromFigma(v)
+      if (list.length) n.reactions = list
+      else delete n.reactions
+    },
     exportAsync: () => async () => {
       throw new Error('exportAsync is not available here — use the get_screenshot / download_assets / export_image tools instead')
     },
@@ -511,6 +585,9 @@ export async function runFigmaCodeInline(
     innerRadius: (n) => n.starInnerRadius ?? 0.382,
     booleanOperation: (n) => n.booleanOp,
     vectorPaths: (n) => [{ windingRule: n.vectorFillRule === 'evenodd' ? 'EVENODD' : 'NONZERO', data: n.vectorPath ?? '' }],
+    reactions: (n) => reactionsToFigma(n.reactions),
+    overlayBackground: (n) =>
+      !n.overlayBackground || n.overlayBackground.type === 'NONE' ? { type: 'NONE' } : { type: 'SOLID_COLOR', color: { ...toRgb(n.overlayBackground.color), a: n.overlayBackground.opacity ?? 1 } },
     mainComponent: (n) => (n.componentId && byId.has(n.componentId) ? wrap(byId.get(n.componentId)!) : null),
     key: (n) => n.id,
     absoluteBoundingBox: (n) => {
@@ -528,6 +605,18 @@ export async function runFigmaCodeInline(
   }
 
   const setters: Record<string, (n: SceneNode, v: never) => void> = {
+    reactions: (n, v: unknown) => {
+      const list = reactionsFromFigma(v)
+      if (list.length) n.reactions = list
+      else delete n.reactions
+    },
+    overlayBackground: (n, v: Rec | null) => {
+      if (!v || v.type !== 'SOLID_COLOR') n.overlayBackground = { type: 'NONE' }
+      else {
+        const c = (v.color ?? {}) as Rec
+        n.overlayBackground = typeof c === 'string' ? { type: 'SOLID_COLOR', color: c } : { type: 'SOLID_COLOR', color: toHex(c as { r: number; g: number; b: number }), opacity: typeof c.a === 'number' ? c.a : 1 }
+      }
+    },
     rotation: (n, v: number) => void (v ? (n.rotation = -v) : delete n.rotation),
     fills: (n, v) => void (n.fills = paintsFromFigma(v)),
     strokes: (n, v) => {
@@ -673,6 +762,19 @@ export async function runFigmaCodeInline(
       },
       set selection(v: unknown[]) {
         selection = { pageId: p.pageId, ids: v.map((x) => unwrap(x).id) }
+      },
+      get flowStartingPoints() {
+        return all()
+          .filter((n) => n.flowStart)
+          .map((n) => ({ nodeId: n.id, name: n.flowStart }))
+      },
+      set flowStartingPoints(v: { nodeId: string; name?: string }[]) {
+        edits++
+        for (const n of all()) if (n.flowStart) delete n.flowStart
+        ;(v ?? []).forEach((f, i) => {
+          const n = byId.get(f.nodeId)
+          if (n && pageOf.get(n.id) === p) n.flowStart = f.name || `Flow ${i + 1}`
+        })
       },
       appendChild: (child: unknown) => attach(unwrap(child), p, undefined),
       insertChild: (index: number, child: unknown) => attach(unwrap(child), p, undefined, index),
@@ -1021,6 +1123,7 @@ Supported:
 - Text: characters, fontSize, fontName {family, style}, lineHeight, letterSpacing, textAlignHorizontal/Vertical, textAutoResize, textDecoration, textCase,
   setRangeFontSize / setRangeFontName / setRangeFills / setRangeTextDecoration / setRangeLetterSpacing. loadFontAsync is accepted (fonts load on demand).
 - Vectors: vectorPaths = [{windingRule, data}] (SVG path data in the node's width × height box — call resize first).
+- Prototyping: await node.setReactionsAsync(reactions) / node.reactions in Figma's shape (NODE actions NAVIGATE or OVERLAY, BACK, CLOSE, URL; transitions DISSOLVE, SMART_ANIMATE, MOVE_IN, PUSH, SLIDE_IN), page.flowStartingPoints, and on frames overflowDirection, scrollBehavior ('FIXED'), overlayPositionType, overlayBackground, overlayBackgroundInteraction (settable here, unlike in Figma).
 - Components: instance.mainComponent, detachInstance(), swapComponent(component); edits to instance layers become overrides.
 - Styles: figma.createPaintStyle() / createTextStyle() / createEffectStyle(), getLocalPaintStylesAsync() / getLocalTextStylesAsync() / getLocalEffectStylesAsync(), style.remove(), node.fillStyleId / textStyleId / setEffectStyleIdAsync (effect styles are copied onto the layer, not saved as shared styles).
 - Plugin data: node / style getPluginData / setPluginData / getSharedPluginData / setSharedPluginData are saved with the file.

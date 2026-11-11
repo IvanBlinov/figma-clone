@@ -51,6 +51,9 @@ function contentRange(ix: DocIndex, n: SceneNode): Range {
   }
 }
 
+/** Added to a fixed layer's order so it sorts after the screen's scrolling layers. */
+const FIXED_ON_TOP = 1e6
+
 const clamp = (v: number, max: number) => Math.min(Math.max(0, v), max)
 
 /** One axis of a fixed layer on a frame cut by `cut` from `size`: its constraint decides how it follows the device's edges. */
@@ -106,7 +109,8 @@ export function frameView(ix: DocIndex, frameId: string, device: PrototypeDevice
     for (const id of kids(ix, parent)) {
       const c = moved.get(id) ?? ix.byId.get(id)!
       if (c.scrollBehavior === 'FIXED') {
-        if (parent === frameId) moved.set(id, { ...c, ...pinned(c, cutX, cutY, frame) })
+        // Fixed layers of the screen also draw above everything that scrolls, as in Figma.
+        if (parent === frameId) moved.set(id, { ...c, ...pinned(c, cutX, cutY, frame), order: c.order + FIXED_ON_TOP })
         continue
       }
       if (o.x || o.y) moved.set(id, { ...c, x: c.x - o.x, y: c.y - o.y })
