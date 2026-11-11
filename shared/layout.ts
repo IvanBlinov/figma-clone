@@ -1,6 +1,6 @@
 import { buildIndex, kids, type DocIndex } from './doc'
 import { boundsOf, corners, localMatrix, rotate, apply } from './geometry'
-import { layoutText, type MeasureFn } from './text'
+import { fontSizeOf, layoutText, lineHeightOf, type MeasureFn } from './text'
 import { isAutoLayout, type SceneNode } from './types'
 
 const GEOM = ['x', 'y', 'width', 'height'] as const
@@ -134,7 +134,11 @@ function layoutNode(ix: DocIndex, id: string, measure: MeasureFn, forcedW?: numb
 
   const sumP = flow.reduce((s, c) => s + c[P], 0)
   if (hugP) n[P] = padP0 + sumP + gaps + padP1
-  if (hugC) n[C] = padC0 + flow.reduce((m, c) => Math.max(m, c[C]), 0) + padC1
+  // Baseline alignment (horizontal rows only): each child is moved down so its first baseline meets the lowest one.
+  const byBaseline = horiz && n.counterAxisAlignItems === 'BASELINE'
+  const bases = byBaseline ? flow.map((c) => baselineOf(ix, c)) : []
+  const top = byBaseline ? Math.max(0, ...bases) : 0
+  if (hugC) n[C] = padC0 + flow.reduce((m, c, i) => Math.max(m, c[C] + (byBaseline ? top - bases[i] : 0)), 0) + padC1
   clampSize(n)
 
   // Position.
@@ -147,11 +151,26 @@ function layoutNode(ix: DocIndex, id: string, measure: MeasureFn, forcedW?: numb
   else if (align === 'MAX') cursor += innerP - sumP - gaps
   else if (align === 'SPACE_BETWEEN' && flow.length > 1) step = (innerP - sumP) / (flow.length - 1)
   const cAlign = n.counterAxisAlignItems ?? 'MIN'
-  for (const c of flow) {
+  flow.forEach((c, i) => {
     c[PP] = cursor
-    c[CP] = padC0 + (cAlign === 'CENTER' ? (innerC2 - c[C]) / 2 : cAlign === 'MAX' ? innerC2 - c[C] : 0)
+    c[CP] = padC0 + (byBaseline ? top - bases[i] : cAlign === 'CENTER' ? (innerC2 - c[C]) / 2 : cAlign === 'MAX' ? innerC2 - c[C] : 0)
     cursor += c[P] + step
+  })
+}
+
+/** Distance from a node's top to its first text baseline (as text is drawn); a node without text uses its bottom. */
+export function baselineOf(ix: DocIndex, c: SceneNode, depth = 0): number {
+  if (c.type === 'TEXT') {
+    const fs = fontSizeOf(c)
+    return (lineHeightOf(c) - fs * 1.21) / 2 + fs * 0.969
   }
+  if (c.type === 'FRAME' && c.layoutMode && c.layoutMode !== 'NONE' && depth < 20) {
+    const first = kids(ix, c.id)
+      .map((id) => ix.byId.get(id)!)
+      .find((k) => k.visible !== false && k.layoutPositioning !== 'ABSOLUTE')
+    if (first) return first.y + baselineOf(ix, first, depth + 1)
+  }
+  return c.height
 }
 
 /** Horizontal auto layout that wraps children onto new rows. */

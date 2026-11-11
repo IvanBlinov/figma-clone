@@ -5,8 +5,10 @@
 import { descendants, kids, worldMatrix, type DocIndex } from '../shared/doc'
 import { boundsOf, corners } from '../shared/geometry'
 import { svgToNodes } from '../shared/svgParse'
-import { styleRange } from '../shared/text'
-import { defaultsFor, newId, type Effect, type NodeType, type Paint, type SceneNode, type TextRunStyle } from '../shared/types'
+import { overrideKeys } from '../shared/resolve'
+import { estimateMeasure, styleRange } from '../shared/text'
+import { runLayout } from '../shared/layout'
+import { defaultsFor, isAutoLayout, newId, type Effect, type NodeType, type Paint, type SceneNode, type TextRunStyle } from '../shared/types'
 
 export interface PageModel {
   pageId: string
@@ -189,6 +191,52 @@ export async function runFigmaCodeInline(
     return n
   }
 
+  /**
+   * Edits a script makes to an instance or the layers inside it (text, fills, visibility, …) become overrides, as in
+   * Figma: whatever now differs from the component's own layer is recorded, so syncing the instance keeps it.
+   */
+  function recordOverrides() {
+    for (const n of byId.values()) {
+      const mainId = n.sourceId ?? (n.componentId && !n.sourceId ? n.componentId : undefined)
+      const main = mainId ? byId.get(mainId) : undefined
+      if (!main || main === n) continue
+      const a = n as unknown as Rec
+      const b = main as unknown as Rec
+      const patch: Rec = {}
+      for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) patch[k] = a[k]
+      const keys = overrideKeys(n, patch)
+      if (!keys.length) continue
+      const set = new Set([...(n.overrides ?? []), ...keys])
+      if (set.size !== (n.overrides ?? []).length) n.overrides = [...set]
+    }
+  }
+  // Auto layout runs when a script reads geometry, as in Figma: a frame set to fill its parent reports its real width
+  // once the parent is laid out. Every edit bumps `edits`; a layout root is laid out again only after an edit.
+  let edits = 0
+  const laidOutAt = new Map<string, number>()
+  /** The frame whose layout decides this node's geometry: climb while the parent is an auto-layout frame. */
+  const layoutRoot = (n: SceneNode): SceneNode => {
+    let cur = n
+    for (let guard = 0; guard < 1000; guard++) {
+      const p = cur.parentId ? byId.get(cur.parentId) : undefined
+      if (!p || !isAutoLayout(p)) break
+      cur = p
+    }
+    return cur
+  }
+  function ensureLayout(n: SceneNode) {
+    const root = layoutRoot(n)
+    if (laidOutAt.get(root.id) === edits) return
+    const page = pageOf.get(root.id)
+    if (!page) return
+    const sub = [root, ...descendants(indexOf(page), root.id).map((id) => byId.get(id)!)]
+    // Laid out on its own: the root keeps its place, and its children are placed inside it.
+    const res = runLayout(sub.map((x, i) => (i === 0 ? { ...x, parentId: undefined } : x)), estimateMeasure)
+    for (const { id, patch } of res.patches) Object.assign(byId.get(id)!, patch)
+    laidOutAt.set(root.id, edits)
+  }
+  const GEOMETRY_READS = new Set(['x', 'y', 'width', 'height', 'absoluteBoundingBox', 'absoluteRenderBounds', 'absoluteTransform', 'relativeTransform'])
+
   /** A new id no layer in the file uses yet. */
   function freshId(): string {
     let id = newId()
@@ -196,6 +244,7 @@ export async function runFigmaCodeInline(
     return id
   }
   function add(page: PageModel, n: SceneNode) {
+    edits++
     page.nodes.push(n)
     byId.set(n.id, n)
     pageOf.set(n.id, page)
@@ -203,6 +252,7 @@ export async function runFigmaCodeInline(
     listAt(keyOf(n)).push(n.id)
   }
   function removeNode(n: SceneNode) {
+    edits++
     const page = pageOf.get(n.id)!
     const gone = [n.id, ...descendants(indexOf(page), n.id)]
     unlist(n)
@@ -219,6 +269,7 @@ export async function runFigmaCodeInline(
     return false
   }
   function attach(n: SceneNode, page: PageModel, parentId: string | undefined, index?: number) {
+    edits++
     const from = pageOf.get(n.id)!
     if (parentId && within(parentId, n.id)) throw new Error('Cannot append a node to itself or its own descendant')
     unlist(n)
@@ -497,7 +548,7 @@ export async function runFigmaCodeInline(
     },
     letterSpacing: (n, v: { value: number; unit?: string } | number) => void (n.letterSpacing = typeof v === 'number' ? v : v.unit === 'PERCENT' ? ((n.fontSize ?? 12) * v.value) / 100 : v.value),
     textAutoResize: (n, v: string) => void (n.textAutoResize = v === 'TRUNCATE' ? 'NONE' : (v as 'NONE')),
-    counterAxisAlignItems: (n, v: string) => void (n.counterAxisAlignItems = v === 'BASELINE' ? 'MIN' : (v as 'MIN')),
+    counterAxisAlignItems: (n, v: string) => void (n.counterAxisAlignItems = v as 'MIN'),
     layoutWrap: (n, v: string) => void (v === 'WRAP' ? (n.layoutWrap = true) : delete n.layoutWrap),
     layoutGrow: (n, v: number) => {
       flags.set(n.id, { ...flags.get(n.id), grow: v > 0 })
@@ -554,13 +605,18 @@ export async function runFigmaCodeInline(
           if (key === 'removed') return !byId.has(id)
           if (key === 'then') return undefined
           const cur = live()
-          if (Object.hasOwn(methods, key)) return methods[key](cur)
+          if (GEOMETRY_READS.has(key)) ensureLayout(cur)
+          if (Object.hasOwn(methods, key)) {
+            edits++
+            return methods[key](cur)
+          }
           if (Object.hasOwn(getters, key)) return getters[key](cur)
           if (DIRECT.has(key)) return (cur as unknown as Rec)[key] ?? (key === 'visible' ? true : key === 'opacity' ? 1 : key === 'locked' || key === 'isMask' ? false : NULLABLE.has(key) ? null : (cur as unknown as Rec)[key])
           return undefined
         },
         set(_t, key, value) {
           if (typeof key === 'symbol') return true
+          edits++
           const cur = live()
           if (key === 'width' || key === 'height') throw new Error(`"${key}" is read-only — use node.resize(width, height)`)
           if (Object.hasOwn(setters, key)) setters[key](cur, value as never)
@@ -940,6 +996,7 @@ export async function runFigmaCodeInline(
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...params: string[]) => (...args: unknown[]) => Promise<unknown>
   const result = await new AsyncFunction('figma', 'console', code)(figma, con)
 
+  recordOverrides()
   for (const p of pages) compact(p)
   return { result: plain(result, 0), logs, warnings: [...warnings], selection, currentPageId: current.pageId }
 }

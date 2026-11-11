@@ -128,7 +128,8 @@ export interface SceneNode {
   paddingTop?: number
   paddingBottom?: number
   primaryAxisAlignItems?: 'MIN' | 'CENTER' | 'MAX' | 'SPACE_BETWEEN'
-  counterAxisAlignItems?: 'MIN' | 'CENTER' | 'MAX'
+  /** BASELINE lines up the first text baselines of a horizontal row's children. */
+  counterAxisAlignItems?: 'MIN' | 'CENTER' | 'MAX' | 'BASELINE'
   // Any node (meaningful inside auto-layout parents, and on auto-layout frames themselves)
   layoutSizingHorizontal?: Sizing
   layoutSizingVertical?: Sizing
