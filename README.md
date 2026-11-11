@@ -39,13 +39,14 @@ talks to the separate dev deployment, so it never touches production data.
 
 ### Agents (MCP)
 
-The MCP server acts as one user and can reach exactly the files that user can. Three ways to authenticate:
+The MCP server acts as one user and can reach exactly the files that user can. Ways to authenticate:
 
 | Method | How |
 | --- | --- |
+| Hosted endpoint | Nothing to install: point the agent at `https://adorable-magpie-715.convex.site/mcp` (see "Connect an agent"). It signs you in through the browser with OAuth, or accepts an API token as a bearer token. |
 | Browser sign-in (OAuth) | Call the `login` tool: it opens the app's consent page, you approve, and the token is cached in `~/.figma-clone/credentials.json`. `logout` forgets it. |
 | API token | In the app: Account (key icon, bottom left) → API tokens → Create token, then set `FIGMA_CLONE_TOKEN` in the MCP config. Shown once; stored only as a hash. |
-| Remote MCP over HTTP | `node mcp/dist/server.mjs --http 3333` serves `/mcp` (Streamable HTTP). Clients discover the authorization server from `/.well-known/oauth-protected-resource` and sign the user in with standard OAuth 2.1 (authorization code + PKCE, dynamic client registration). Set `FIGMA_CLONE_PUBLIC_URL` when it is reachable under another address. |
+| Self-hosted HTTP | `node mcp/dist/server.mjs --http 3333` serves `/mcp` (Streamable HTTP). Clients discover the authorization server from `/.well-known/oauth-protected-resource` and sign the user in with standard OAuth 2.1 (authorization code + PKCE, dynamic client registration). Set `FIGMA_CLONE_PUBLIC_URL` when it is reachable under another address. |
 
 Both kinds of token can be revoked under Account → API tokens. The OAuth endpoints are served by the Convex
 deployment (`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`, `/oauth/token`).
@@ -55,6 +56,27 @@ A deployment needs three environment variables: `JWT_PRIVATE_KEY` and `JWKS` (si
 deployment, `node scripts/setup-auth-env.mjs --prod` for production.
 
 ## Connect an agent (MCP)
+
+### Hosted (no install)
+
+The MCP server also runs inside the Convex deployment, at `<deployment>.convex.site/mcp` (Streamable HTTP). Any
+machine can connect with one line and no clone:
+
+```bash
+claude mcp add --transport http figma-clone https://adorable-magpie-715.convex.site/mcp
+```
+
+The agent opens the app's consent page on first use (OAuth 2.1 with PKCE and dynamic client registration, discovered
+from `/.well-known/oauth-protected-resource`). Clients without OAuth support can send an API token instead:
+`--header "Authorization: Bearer <token>"`, or in JSON
+`{ "type": "http", "url": "…/mcp", "headers": { "Authorization": "Bearer <token>" } }`.
+
+Differences from the local server: `use_figma` is not offered (it runs caller-supplied JavaScript, which is not safe
+on a shared server), `login` / `logout` are not needed, `upload_assets` takes `url`, `base64` or `svg` but no
+local `path`, and PNG exports draw every font family as Inter. `node mcp/hosted-test.mjs` checks the endpoint of the
+dev deployment.
+
+### Local (stdio)
 
 The repo ships a `.mcp.json`, so Claude Code started in this folder picks up the `figma-clone` server automatically
 (approve it when prompted). For any other MCP client:
@@ -171,7 +193,8 @@ shared/    document model used by the editor, the backend and the MCP server:
            types, geometry, auto-layout engine, text layout (mixed styles), vector paths, boolean shapes,
            resolve (constraints + component instances), SVG export, CSS generation
 src/       React editor (canvas renderer, interactions, panels), file browser, prototype player
-mcp/       stdio MCP server (talks to Convex over HTTP, renders PNGs with resvg); parity.ts holds the
+mcp/       MCP server (talks to Convex over HTTP, renders PNGs with resvg): cli.ts runs it over stdio or HTTP,
+           convex/mcpNode.ts runs it inside the deployment (/mcp route in convex/http.ts); parity.ts holds the
            Figma-compatible tools, figmaApi.ts the Plugin API shim behind use_figma, diagram.ts the Mermaid layout
 ```
 

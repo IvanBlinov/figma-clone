@@ -1,5 +1,5 @@
 import { httpRouter } from 'convex/server'
-import { internal } from './_generated/api'
+import { api, internal } from './_generated/api'
 import { httpAction } from './_generated/server'
 import { sha256Hex } from './access'
 import { auth } from './auth'
@@ -101,6 +101,57 @@ http.route({
     const res = await ctx.runMutation(internal.oauth.exchange, { codeHash: await sha256Hex(code), clientId, redirectUri, challenge, tokenHash: await sha256Hex(token), prefix: token.slice(0, 10) })
     if ('error' in res) return json({ error: res.error, error_description: res.description }, 400)
     return json({ access_token: token, token_type: 'Bearer', scope: 'files' })
+  }),
+})
+
+// ---------- hosted MCP endpoint ----------
+// Streamable HTTP, stateless: each POST is one JSON-RPC exchange, answered as JSON. The caller is identified by a
+// bearer token (an API token or one issued by the OAuth flow above); clients find the sign-in through the
+// protected-resource metadata.
+const MCP_CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Expose-Headers': 'WWW-Authenticate, Mcp-Session-Id',
+}
+const mcpJson = (body: unknown, status: number, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...MCP_CORS, ...headers } })
+const resourceMetadata = httpAction(async () =>
+  mcpJson({ resource: `${issuer()}/mcp`, authorization_servers: [issuer()], bearer_methods_supported: ['header'], scopes_supported: ['files'], resource_name: 'Figma Clone' }, 200),
+)
+http.route({ path: '/.well-known/oauth-protected-resource', method: 'GET', handler: resourceMetadata })
+http.route({ pathPrefix: '/.well-known/oauth-protected-resource/', method: 'GET', handler: resourceMetadata })
+const mcpPreflight = httpAction(async () => new Response(null, { status: 204, headers: MCP_CORS }))
+http.route({ path: '/mcp', method: 'OPTIONS', handler: mcpPreflight })
+http.route({ path: '/.well-known/oauth-protected-resource', method: 'OPTIONS', handler: mcpPreflight })
+// No server-initiated stream and no sessions to end.
+const mcpPostOnly = httpAction(async () =>
+  mcpJson({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed: this endpoint is stateless, use POST' }, id: null }, 405, { Allow: 'POST, OPTIONS' }),
+)
+http.route({ path: '/mcp', method: 'GET', handler: mcpPostOnly })
+http.route({ path: '/mcp', method: 'DELETE', handler: mcpPostOnly })
+
+http.route({
+  path: '/mcp',
+  method: 'POST',
+  handler: httpAction(async (ctx, req) => {
+    const challenge = `Bearer resource_metadata="${issuer()}/.well-known/oauth-protected-resource"`
+    const token = /^Bearer\s+(.+)$/i.exec(req.headers.get('authorization') ?? '')?.[1]
+    if (!token) return mcpJson({ error: 'unauthorized', error_description: 'Sign in required' }, 401, { 'WWW-Authenticate': challenge })
+    const user = await ctx.runQuery(api.users.me, { token }).catch(() => null)
+    if (!user) return mcpJson({ error: 'invalid_token', error_description: 'The access token is invalid, expired or revoked' }, 401, { 'WWW-Authenticate': challenge + ', error="invalid_token"' })
+    const headers: Record<string, string> = {}
+    for (const name of ['accept', 'content-type', 'mcp-protocol-version']) {
+      const value = req.headers.get(name)
+      if (value) headers[name] = value
+    }
+    try {
+      const out = await ctx.runAction(internal.mcpNode.handle, { token, url: req.url, headers, body: await req.text() })
+      return new Response(out.status === 202 || out.status === 204 ? null : out.body, { status: out.status, headers: { 'Content-Type': out.contentType, 'Cache-Control': 'no-store', ...MCP_CORS } })
+    } catch (e) {
+      console.error('mcp', e)
+      return mcpJson({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null }, 500)
+    }
   }),
 })
 

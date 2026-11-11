@@ -4,6 +4,7 @@ import { Resvg } from '@resvg/resvg-js'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { extname } from 'node:path'
+import { fontOptions } from './fonts'
 import { z } from 'zod'
 import { isBoolean } from '../shared/boolean'
 import { cssOf } from '../shared/css'
@@ -60,7 +61,7 @@ function render(ix: DocIndex, ids: string[], maxDimension = 1024, background?: s
   const probe = exportSvg(ix, ids, { measure: estimateMeasure })
   const scale = Math.min(4, maxDimension / Math.max(probe.width, probe.height, 1))
   const { svg, width, height } = exportSvg(ix, ids, { measure: estimateMeasure, scale, background })
-  const png = new Resvg(svg, { font: { loadSystemFonts: true, defaultFontFamily: 'Arial' } }).render().asPng()
+  const png = new Resvg(svg, { font: fontOptions() }).render().asPng()
   return { png: Buffer.from(png).toString('base64'), width: Math.round(width), height: Math.round(height), original_width: Math.round(probe.width), original_height: Math.round(probe.height) }
 }
 
@@ -554,6 +555,7 @@ export function registerParity(d: ParityDeps) {
           buf = Buffer.from(a.svg, 'utf8')
           mime = 'image/svg+xml'
         } else if (a.path) {
+          if (d.authSource() === 'request') throw new Error('Local file paths are not available on the hosted endpoint; pass the asset as url, base64 or svg')
           if (!existsSync(a.path)) throw new Error(`File not found: ${a.path}`)
           mime ??= MIME[extname(a.path).toLowerCase()]
           if (!mime) throw new Error(`Unsupported file type for ${a.path} (PNG, JPG, GIF, WebP, SVG)`)

@@ -1,7 +1,7 @@
-#!/usr/bin/env node
 /**
- * MCP server for the Figma clone. Speaks stdio and talks to the Convex backend over HTTP,
- * so every change an agent makes shows up live in any open editor.
+ * MCP server for the Figma clone. Talks to the Convex backend over HTTP, so every change an agent makes shows up
+ * live in any open editor. Runs in three places: over stdio or as a standalone HTTP server (cli.ts), and inside the
+ * Convex deployment itself as the hosted endpoint <deployment>.convex.site/mcp (convex/mcpNode.ts).
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -15,6 +15,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { currentToken, forgetToken, requestToken, startLogin } from './auth'
+import { fontOptions } from './fonts'
 import { registerParity } from './parity'
 import {
   ancestors,
@@ -39,7 +40,13 @@ import { estimateMeasure } from '../shared/text'
 import { defaultsFor, newId, typeLabel, type NodeType, type Op, type Paint, type SceneNode } from '../shared/types'
 
 // ---------- config ----------
-const here = dirname(fileURLToPath(import.meta.url))
+const here = (() => {
+  try {
+    return dirname(fileURLToPath(import.meta.url))
+  } catch {
+    return process.cwd()
+  }
+})()
 function envFile(): Record<string, string> {
   for (const p of [resolve(here, '../../.env.local'), resolve(here, '../.env.local'), resolve(process.cwd(), '.env.local')]) {
     if (!existsSync(p)) continue
@@ -53,14 +60,16 @@ function envFile(): Record<string, string> {
   return {}
 }
 const env = envFile()
-const CONVEX_URL = process.env.FIGMA_CLONE_CONVEX_URL || env.VITE_CONVEX_URL || 'http://127.0.0.1:3210'
-const APP_URL = (process.env.FIGMA_CLONE_APP_URL || 'http://localhost:5173').replace(/\/$/, '')
+// Inside the Convex deployment (hosted endpoint) its own URLs come from the built-in environment.
+const CONVEX_URL = process.env.FIGMA_CLONE_CONVEX_URL || process.env.CONVEX_CLOUD_URL || env.VITE_CONVEX_URL || 'http://127.0.0.1:3210'
+const APP_URL = (process.env.FIGMA_CLONE_APP_URL || (process.env.CONVEX_CLOUD_URL && process.env.SITE_URL) || 'http://localhost:5173').replace(/\/$/, '')
 const AGENT_NAME = process.env.FIGMA_CLONE_AGENT_NAME || 'Claude'
 const SESSION = 'agent-' + newId()
 
 // HTTP endpoints of the deployment (OAuth). Convex cloud serves them on *.convex.site; a local backend on the next port.
 const SITE_URL = (
   process.env.FIGMA_CLONE_SITE_URL ||
+  process.env.CONVEX_SITE_URL ||
   (process.env.FIGMA_CLONE_CONVEX_URL ? '' : env.VITE_CONVEX_SITE_URL) ||
   (CONVEX_URL.includes('.convex.cloud') ? CONVEX_URL.replace('.convex.cloud', '.convex.site') : CONVEX_URL.replace(/:(\d+)$/, (_m, p) => ':' + (+p + 1)))
 ).replace(/\/$/, '')
@@ -339,11 +348,20 @@ const NODE_GUIDE = `Node model (all coordinates are px, relative to the parent's
 - Prototype: reactions:[{trigger:"ON_CLICK"|"ON_HOVER"|"ON_PRESS"|"AFTER_TIMEOUT", action:"NAVIGATE"|"OVERLAY"|"CLOSE_OVERLAY"|"BACK"|"URL", destinationId? (a top-level FRAME), url?, transition?:"INSTANT"|"DISSOLVE"|"SMART_ANIMATE"|"MOVE_IN"|"PUSH"|"SLIDE_IN", direction?, duration? (ms), easing?, timeout? (ms)}] on any node; flowStart:"Flow 1" on a top-level frame marks a starting point. See add_interaction / get_prototype_url.
 - Shared styles: fillStyleId / strokeStyleId / textStyleId link a node to a style from list_styles (use apply_style); editing the style updates every linked node.`
 
-const makeServer = () => {
-  const server = new McpServer({ name: 'figma-clone', version: '0.4.0' }, { instructions: INSTRUCTIONS })
-  for (const r of registrations) server.registerTool(r.name, { description: r.description, inputSchema: r.shape }, r.run as never)
+/**
+ * Tools that only make sense when the server runs on the user's own machine. They are left out when it serves many
+ * users over HTTP: login / logout manage a token file on disk, and use_figma runs caller-supplied JavaScript in
+ * node:vm, which is not a security boundary.
+ */
+const LOCAL_ONLY = new Set(['login', 'logout', 'use_figma'])
+
+/** A server instance. `shared` = serving several users over HTTP, each request carrying its own token. */
+export const makeServer = (shared = false) => {
+  const server = new McpServer({ name: 'figma-clone', version: '0.5.0' }, { instructions: shared ? INSTRUCTIONS_SHARED : INSTRUCTIONS })
+  for (const r of registrations) if (!shared || !LOCAL_ONLY.has(r.name)) server.registerTool(r.name, { description: r.description, inputSchema: r.shape }, r.run as never)
   return server
 }
+export { requestToken }
 
 const INSTRUCTIONS = `Design tool (Figma clone) backed by Convex. Projects group files (a file without a project is a draft). Files contain pages; pages contain a tree of nodes. Edits appear live in the browser editor at ${APP_URL}.
 Typical flow: list_files / create_file → get_tree to inspect → create_nodes / update_nodes to design → export_image to look at the result and iterate.
@@ -356,6 +374,10 @@ Never guess ids: take them from list_files, list_pages, get_tree, find_nodes or 
 Access: you act as one user and see only the files they own or were invited to. If a tool reports "Not signed in", call login (opens a browser sign-in for the user) and retry.
 
 ${NODE_GUIDE}`
+const INSTRUCTIONS_SHARED = INSTRUCTIONS.replace(/, and use_figma, which runs[^\n]*/, '.').replace(
+  /Access: [^\n]*/,
+  'Access: you act as the signed-in user and see only the files they own or were invited to. use_figma and local file paths are not available on this hosted endpoint; use create_nodes / update_nodes, and pass assets as url, base64 or svg.',
+)
 
 tool(
   'login',
@@ -1185,7 +1207,7 @@ tool(
     if (maxSide > 2400) s *= 2400 / maxSide
     const { svg, width, height } = exportSvg(ctx.ix, ids, { measure: estimateMeasure, background, scale: s, images })
     if (format === 'svg') return ok(svg)
-    const png = new Resvg(svg, { font: { loadSystemFonts: true, defaultFontFamily: 'Arial' } }).render().asPng()
+    const png = new Resvg(svg, { font: fontOptions() }).render().asPng()
     return {
       content: [
         { type: 'image' as const, data: Buffer.from(png).toString('base64'), mimeType: 'image/png' },
@@ -1243,6 +1265,8 @@ registerParity({
 })
 
 // ---------- transports ----------
+/** Entry point of the standalone program (cli.ts): stdio by default, HTTP with --http <port>. */
+export async function main() {
 const httpFlag = process.argv.indexOf('--http')
 const httpPort = httpFlag >= 0 ? Number(process.argv[httpFlag + 1]) || 3333 : process.env.FIGMA_CLONE_HTTP_PORT ? Number(process.env.FIGMA_CLONE_HTTP_PORT) : 0
 
@@ -1278,7 +1302,7 @@ else {
         }
       }
       // Stateless: a fresh server per request, bound to the caller's token for the duration of the call.
-      const server = makeServer()
+      const server = makeServer(true)
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
       res.on('close', () => {
         void transport.close()
@@ -1293,4 +1317,5 @@ else {
       if (!res.headersSent) send(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: e instanceof Error ? e.message : 'Internal error' }, id: null })
     }
   }).listen(httpPort, () => console.error(`figma-clone MCP server listening on ${base}/mcp (authorization server: ${SITE_URL})`))
+}
 }

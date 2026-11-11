@@ -16,6 +16,7 @@ import type * as files from "../files.js";
 import type * as http from "../http.js";
 import type * as images from "../images.js";
 import type * as library from "../library.js";
+import type * as mcpNode from "../mcpNode.js";
 import type * as nodes from "../nodes.js";
 import type * as oauth from "../oauth.js";
 import type * as pages from "../pages.js";
@@ -42,6 +43,7 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   images: typeof images;
   library: typeof library;
+  mcpNode: typeof mcpNode;
   nodes: typeof nodes;
   oauth: typeof oauth;
   pages: typeof pages;
