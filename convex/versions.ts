@@ -1,7 +1,7 @@
 import { mutation, query, type MutationCtx } from './_generated/server'
 import { v } from 'convex/values'
 import type { Id } from './_generated/dataModel'
-import { fileAccess, tokenArg } from './access'
+import { fileAccess, tokenArg, touchFile } from './access'
 
 export const list = query({
   args: { fileId: v.id('files'), ...tokenArg },
@@ -93,7 +93,7 @@ export const restore = mutation({
       const pageId = pageMap.get(n.pageId)
       if (pageId) await ctx.db.insert('nodes', { fileId, pageId, nid: n.nid, data: n.data })
     }
-    await ctx.db.patch(fileId, { updatedAt: Date.now() })
+    await touchFile(ctx, fileId)
   },
 })
 

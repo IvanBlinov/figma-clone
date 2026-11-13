@@ -27,16 +27,17 @@ export const update = mutation({
     ...tokenArg,
   },
   handler: async (ctx, { token, ...args }) => {
-    // Anyone who can see the file shows up in it; silently ignore everybody else.
-    if (!(await tryAccess(ctx, args.fileId, token))) return
     const now = Date.now()
     const existing = await ctx.db
       .query('presence')
       .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
       .unique()
     if (existing) {
+      // Access was checked when this session joined (its id is unguessable), so a cursor move costs one read and one write.
       if (existing.fileId === args.fileId) await ctx.db.patch(existing._id, { ...args, updatedAt: now })
     } else {
+      // Anyone who can see the file shows up in it; silently ignore everybody else.
+      if (!(await tryAccess(ctx, args.fileId, token))) return
       await ctx.db.insert('presence', { ...args, updatedAt: now })
       // Sweep stale rows whenever somebody joins.
       const rows = await ctx.db

@@ -1,6 +1,8 @@
-import { internalMutation, mutation, query } from './_generated/server'
+import { internal } from './_generated/api'
+import type { Id } from './_generated/dataModel'
+import { internalAction, internalMutation, internalQuery, mutation, query } from './_generated/server'
 import { ConvexError, v } from 'convex/values'
-import { accessibleFiles, fileAccess, requireUser, tokenArg, tryAccess, viewerId } from './access'
+import { accessibleFiles, deleteFileMeta, fileAccess, fileMeta, requireUser, setFileThumbnail, tokenArg, touchFile, tryAccess, viewerId } from './access'
 
 /** Files the caller owns or has been invited to, newest first. Signed-out callers get an empty list. */
 export const list = query({
@@ -12,7 +14,7 @@ export const list = query({
     const out = []
     for (const { file, role } of rows) {
       const owner = role === 'owner' || !file.ownerId ? null : await ctx.db.get(file.ownerId)
-      out.push({ ...file, role, ownerName: owner ? (owner.name ?? owner.email ?? 'Someone') : null })
+      out.push({ ...file, ...(await fileMeta(ctx, file)), role, ownerName: owner ? (owner.name ?? owner.email ?? 'Someone') : null })
     }
     return out.sort((a, b) => b.updatedAt - a.updatedAt)
   },
@@ -27,7 +29,10 @@ export const get = query({
     if (!fileId) return null
     const a = await tryAccess(ctx, fileId, token)
     if (!a) return null
-    return { ...a.file, role: a.role, signedIn: !!a.userId }
+    const project = a.file.projectId ? await ctx.db.get(a.file.projectId) : null
+    // The preview is left out: the editor never shows it, and older files still carry it as a large base64 string.
+    const { thumbnail: _legacy, ...file } = a.file
+    return { ...file, role: a.role, signedIn: !!a.userId, projectName: project?.name ?? null }
   },
 })
 
@@ -49,7 +54,8 @@ export const rename = mutation({
   args: { fileId: v.id('files'), name: v.string(), ...tokenArg },
   handler: async (ctx, { fileId, name, token }) => {
     await fileAccess(ctx, fileId, token, 'edit')
-    await ctx.db.patch(fileId, { name, updatedAt: Date.now() })
+    await ctx.db.patch(fileId, { name })
+    await touchFile(ctx, fileId)
   },
 })
 
@@ -67,11 +73,11 @@ export const setProject = mutation({
 })
 
 export const setThumbnail = mutation({
-  args: { fileId: v.id('files'), thumbnail: v.string(), ...tokenArg },
-  handler: async (ctx, { fileId, thumbnail, token }) => {
-    if (thumbnail.length > 400_000) return
+  args: { fileId: v.id('files'), storageId: v.id('_storage'), ...tokenArg },
+  handler: async (ctx, { fileId, storageId, token }) => {
     const a = await tryAccess(ctx, fileId, token)
-    if (a && a.role !== 'viewer') await ctx.db.patch(fileId, { thumbnail })
+    if (a && a.role !== 'viewer') await setFileThumbnail(ctx, a.file, storageId)
+    else await ctx.storage.delete(storageId)
   },
 })
 
@@ -115,6 +121,7 @@ export const remove = mutation({
       .withIndex('by_file_email', (q) => q.eq('fileId', fileId))
       .collect()
     for (const s of shares) await ctx.db.delete(s._id)
+    await deleteFileMeta(ctx, fileId)
     await ctx.db.delete(fileId)
   },
 })
@@ -128,10 +135,12 @@ export const duplicate = mutation({
     const newId = await ctx.db.insert('files', {
       name: file.name + ' (Copy)',
       updatedAt: Date.now(),
-      thumbnail: file.thumbnail,
       ownerId: userId,
       ...(role === 'owner' && file.projectId ? { projectId: file.projectId } : {}),
     })
+    // The copy shows the original's preview until it is opened and renders its own.
+    const { thumbnail } = await fileMeta(ctx, file)
+    await ctx.db.insert('fileMeta', { fileId: newId, updatedAt: Date.now(), ...(thumbnail && !thumbnail.startsWith('data:') ? { thumbnail } : {}) })
     const pages = await ctx.db
       .query('pages')
       .withIndex('by_file', (q) => q.eq('fileId', fileId))
@@ -174,5 +183,61 @@ export const adoptOrphans = internalMutation({
         projects++
       }
     return { files, projects }
+  },
+})
+
+/**
+ * One-off migration: previews used to be base64 strings on the files row, which made every read of a file cost
+ * up to 400 KB. This moves them into file storage. Run once after deploying:
+ *   npx convex run --prod files:migrateThumbnails
+ */
+export const migrateThumbnails = internalAction({
+  args: {},
+  handler: async (ctx): Promise<{ moved: number }> => {
+    let cursor: string | null = null
+    let moved = 0
+    for (;;) {
+      const page: { rows: { fileId: Id<'files'>; thumbnail: string }[]; cursor: string; done: boolean } = await ctx.runQuery(internal.files.legacyThumbnails, { cursor })
+      for (const { fileId, thumbnail } of page.rows) {
+        const m = /^data:([^;,]+);base64,(.*)$/s.exec(thumbnail)
+        let storageId: Id<'_storage'> | undefined
+        if (m) {
+          const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0))
+          storageId = await ctx.storage.store(new Blob([bytes], { type: m[1] }))
+        }
+        await ctx.runMutation(internal.files.finishThumbnailMigration, { fileId, storageId })
+        moved++
+      }
+      if (page.done) return { moved }
+      cursor = page.cursor
+    }
+  },
+})
+
+export const legacyThumbnails = internalQuery({
+  args: { cursor: v.union(v.string(), v.null()) },
+  handler: async (ctx, { cursor }) => {
+    const res = await ctx.db.query('files').paginate({ cursor, numItems: 8 })
+    return {
+      rows: res.page.filter((f) => f.thumbnail !== undefined).map((f) => ({ fileId: f._id, thumbnail: f.thumbnail! })),
+      cursor: res.continueCursor,
+      done: res.isDone,
+    }
+  },
+})
+
+export const finishThumbnailMigration = internalMutation({
+  args: { fileId: v.id('files'), storageId: v.optional(v.id('_storage')) },
+  handler: async (ctx, { fileId, storageId }) => {
+    const file = await ctx.db.get(fileId)
+    if (!file) {
+      if (storageId) await ctx.storage.delete(storageId)
+      return
+    }
+    // A preview rendered since the deploy is newer than the legacy one: keep it.
+    const current = (await fileMeta(ctx, file)).thumbnail
+    if (storageId && (!current || current.startsWith('data:'))) await setFileThumbnail(ctx, file, storageId)
+    else if (storageId) await ctx.storage.delete(storageId)
+    if ((await ctx.db.get(fileId))?.thumbnail !== undefined) await ctx.db.patch(fileId, { thumbnail: undefined })
   },
 })

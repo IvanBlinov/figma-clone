@@ -13,7 +13,9 @@ export default defineSchema({
   }).index('by_owner', ['ownerId']),
   files: defineTable({
     name: v.string(),
+    // Creation time; the live "last edited" time is fileMeta.updatedAt.
     updatedAt: v.number(),
+    // Legacy base64 preview. New previews are stored in fileMeta; see files:migrateThumbnails.
     thumbnail: v.optional(v.string()),
     projectId: v.optional(v.id('projects')),
     ownerId: v.optional(v.id('users')),
@@ -22,6 +24,14 @@ export default defineSchema({
   })
     .index('by_project', ['projectId'])
     .index('by_owner', ['ownerId']),
+  // Volatile file fields live here so that editing a file never rewrites (and so never invalidates every query
+  // that reads) its files row. thumbnail is the served URL of a JPEG in file storage.
+  fileMeta: defineTable({
+    fileId: v.id('files'),
+    updatedAt: v.number(),
+    thumbnail: v.optional(v.string()),
+    thumbnailId: v.optional(v.id('_storage')),
+  }).index('by_file', ['fileId']),
   // People a file is shared with, by (lower-cased) email so invitations work before the person signs up.
   shares: defineTable({
     fileId: v.id('files'),

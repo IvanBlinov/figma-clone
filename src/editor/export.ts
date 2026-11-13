@@ -30,7 +30,7 @@ export function exportNodes(ids: string[], format: 'PNG' | 'JPG' | 'SVG', scale:
 }
 
 /** Small JPEG preview of the page for the file browser. Returns null if the canvas is tainted or empty. */
-export function makeThumbnail(): string | null {
+export async function makeThumbnail(): Promise<Blob | null> {
   const st = S()
   const ids = kids(st.doc, ROOT)
   if (!ids.length) return null
@@ -39,7 +39,8 @@ export function makeThumbnail(): string | null {
     const pad = Math.max(b.w, b.h) * 0.06
     const box = { x: b.x - pad, y: b.y - pad, w: b.w + pad * 2, h: b.h + pad * 2 }
     const scale = Math.min(480 / box.w, 300 / box.h, 2)
-    return renderToCanvas(st.doc, ids, box, scale, st.pageBg).toDataURL('image/jpeg', 0.72)
+    const canvas = renderToCanvas(st.doc, ids, box, scale, st.pageBg)
+    return await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/jpeg', 0.72))
   } catch {
     return null
   }

@@ -97,7 +97,6 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
   const replyComment = useMutation(api.comments.reply)
   const resolveComment = useMutation(api.comments.setResolved)
   const removeComment = useMutation(api.comments.remove)
-  const projects = useQuery(api.projects.list, {})
   const styles = useQuery(api.styles.list, open)
   const createStyle = useMutation(api.styles.create)
   const updateStyle = useMutation(api.styles.update)
@@ -239,15 +238,21 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
       const st = S()
       if (st.raw === last || !st.raw.length || !pages || pageId !== pages[0]?._id || st.readOnly) return
       last = st.raw
-      const t = makeThumbnail()
-      if (t) void setThumbnail({ fileId, thumbnail: t })
+      void (async () => {
+        const blob = await makeThumbnail()
+        if (!blob) return
+        // The image goes to file storage; the database only keeps its URL.
+        const res = await fetch(await genUpload({}), { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob })
+        const { storageId } = await res.json()
+        await setThumbnail({ fileId, storageId })
+      })().catch(() => {})
     }
-    const iv = setInterval(push, 8000)
+    const iv = setInterval(push, 30_000)
     return () => {
       clearInterval(iv)
       push()
     }
-  }, [fileId, pageId, pages, setThumbnail])
+  }, [fileId, pageId, pages, setThumbnail, genUpload])
 
   // ----- presence -----
   const cursor = useRef<Pt>({ x: 0, y: 0 })
@@ -256,12 +261,14 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
     let lastSent = 0
     const send = () => {
       const t = Date.now()
-      if (!dirty.current && t - lastSent < 4000) return
+      // Every update is a database write that re-runs the presence query of everyone in the file, so cursor moves
+      // go out at most once a second (remote cursors glide between them) and idle sessions only send a heartbeat.
+      if (t - lastSent < (dirty.current ? 1000 : 10_000)) return
       dirty.current = false
       lastSent = t
       void updatePresence({ fileId, sessionId, name: user.name, color: user.color, pageId: pageId ?? undefined, x: cursor.current.x, y: cursor.current.y, selection: S().selection })
     }
-    const iv = setInterval(send, 90)
+    const iv = setInterval(send, 250)
     const unsub = useEditor.subscribe((s, p) => {
       if (s.selection !== p.selection) dirty.current = true
     })
@@ -326,7 +333,7 @@ export function Editor({ fileId }: { fileId: Id<'files'> }) {
           </a>
           <div className="file-title">
             <TextInput className="file-name" value={file?.name ?? ''} onCommit={(name) => name.trim() && !readOnly && void renameFile({ fileId, name: name.trim() })} />
-            <span className="sub">{projects?.find((p) => p._id === file?.projectId)?.name ?? 'Drafts'}</span>
+            <span className="sub">{file?.projectName ?? 'Drafts'}</span>
           </div>
           <div className="file-menu-wrap">
             <button className="icon-btn" title="Main menu" onClick={() => setFileMenu((v) => !v)}>

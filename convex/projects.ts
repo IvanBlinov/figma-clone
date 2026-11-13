@@ -2,7 +2,7 @@ import { mutation, query } from './_generated/server'
 import { ConvexError, v } from 'convex/values'
 import type { Id } from './_generated/dataModel'
 import type { MutationCtx } from './_generated/server'
-import { requireUser, tokenArg, viewerId } from './access'
+import { fileMeta, requireUser, tokenArg, viewerId } from './access'
 
 /** The caller's projects with file counts and a few thumbnails. */
 export const list = query({
@@ -16,10 +16,11 @@ export const list = query({
       .collect()
     const out = []
     for (const p of projects) {
-      const own = await ctx.db
+      const rows = await ctx.db
         .query('files')
         .withIndex('by_project', (q) => q.eq('projectId', p._id))
         .collect()
+      const own = await Promise.all(rows.map((f) => fileMeta(ctx, f)))
       out.push({
         _id: p._id,
         name: p.name,
@@ -29,7 +30,7 @@ export const list = query({
         thumbnails: own
           .sort((a, b) => b.updatedAt - a.updatedAt)
           .slice(0, 4)
-          .map((f) => f.thumbnail ?? null),
+          .map((f) => f.thumbnail),
       })
     }
     return out.sort((a, b) => a.name.localeCompare(b.name))

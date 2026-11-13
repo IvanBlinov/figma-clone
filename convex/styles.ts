@@ -1,7 +1,7 @@
 import { mutation, query, type MutationCtx } from './_generated/server'
 import { v } from 'convex/values'
 import type { Id } from './_generated/dataModel'
-import { fileAccess, tokenArg } from './access'
+import { fileAccess, tokenArg, touchFile } from './access'
 
 export const list = query({
   args: { fileId: v.id('files'), ...tokenArg },
@@ -61,7 +61,7 @@ export const update = mutation({
     await ctx.db.patch(styleId, { ...(name !== undefined ? { name } : {}), ...(value !== undefined ? { value } : {}) })
     if (value !== undefined) {
       await propagate(ctx, style.fileId, styleId, style.kind, value)
-      await ctx.db.patch(style.fileId, { updatedAt: Date.now() })
+      await touchFile(ctx, style.fileId)
     }
   },
 })

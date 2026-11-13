@@ -909,7 +909,7 @@ kbd {
 }
 .cursor {
   position: absolute;
-  transition: left 0.09s linear, top 0.09s linear;
+  transition: left 0.3s ease-out, top 0.3s ease-out;
   z-index: 3;
 }
 .cursor span {

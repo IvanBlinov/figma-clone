@@ -100,3 +100,42 @@ export async function accessibleFiles(ctx: Ctx, userId: Id<'users'>): Promise<{ 
   }
   return out
 }
+
+const metaRow = (ctx: Ctx, fileId: Id<'files'>) =>
+  ctx.db
+    .query('fileMeta')
+    .withIndex('by_file', (q) => q.eq('fileId', fileId))
+    .unique()
+
+/** Last-edited time and preview of a file (falls back to the values older files keep on their own row). */
+export async function fileMeta(ctx: Ctx, file: Doc<'files'>): Promise<{ updatedAt: number; thumbnail: string | null }> {
+  const meta = await metaRow(ctx, file._id)
+  return { updatedAt: Math.max(meta?.updatedAt ?? 0, file.updatedAt), thumbnail: meta?.thumbnail ?? file.thumbnail ?? null }
+}
+
+/** Marks a file as just edited. Written at most twice a minute, and never to the files row itself. */
+export async function touchFile(ctx: MutationCtx, fileId: Id<'files'>) {
+  const now = Date.now()
+  const meta = await metaRow(ctx, fileId)
+  if (!meta) await ctx.db.insert('fileMeta', { fileId, updatedAt: now })
+  else if (now - meta.updatedAt > 30_000) await ctx.db.patch(meta._id, { updatedAt: now })
+}
+
+/** Points a file at a new preview image in storage and deletes the one it replaces. */
+export async function setFileThumbnail(ctx: MutationCtx, file: Doc<'files'>, storageId: Id<'_storage'>) {
+  const thumbnail = await ctx.storage.getUrl(storageId)
+  if (!thumbnail) return
+  const meta = await metaRow(ctx, file._id)
+  if (meta) {
+    await ctx.db.patch(meta._id, { thumbnail, thumbnailId: storageId })
+    if (meta.thumbnailId && meta.thumbnailId !== storageId) await ctx.storage.delete(meta.thumbnailId)
+  } else await ctx.db.insert('fileMeta', { fileId: file._id, updatedAt: file.updatedAt, thumbnail, thumbnailId: storageId })
+  if (file.thumbnail !== undefined) await ctx.db.patch(file._id, { thumbnail: undefined })
+}
+
+export async function deleteFileMeta(ctx: MutationCtx, fileId: Id<'files'>) {
+  const meta = await metaRow(ctx, fileId)
+  if (!meta) return
+  if (meta.thumbnailId) await ctx.storage.delete(meta.thumbnailId)
+  await ctx.db.delete(meta._id)
+}

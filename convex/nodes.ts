@@ -1,6 +1,6 @@
 import { mutation, query } from './_generated/server'
 import { ConvexError, v } from 'convex/values'
-import { fileAccess, pageAccess, tokenArg } from './access'
+import { fileAccess, pageAccess, tokenArg, touchFile } from './access'
 
 export const list = query({
   args: { pageId: v.id('pages'), ...tokenArg },
@@ -81,6 +81,6 @@ export const applyOps = mutation({
         if (row) await ctx.db.delete(row._id)
       }
     }
-    await ctx.db.patch(fileId, { updatedAt: Date.now() })
+    await touchFile(ctx, fileId)
   },
 })
